@@ -477,6 +477,12 @@ func disableCurrentAgentDND(townRoot string) (bool, error) {
 
 // ensureDaemon starts the daemon if not running.
 func ensureDaemon(townRoot string) error {
+	// GH#2656: Don't restart the daemon while gt down is running.
+	sentinelPath := filepath.Join(townRoot, ShutdownSentinel)
+	if _, err := os.Stat(sentinelPath); err == nil {
+		return fmt.Errorf("shutdown in progress (sentinel exists: %s)", sentinelPath)
+	}
+
 	running, _, err := daemon.IsRunning(townRoot)
 	if err != nil {
 		return err

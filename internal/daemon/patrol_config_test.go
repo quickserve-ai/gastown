@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadPatrolConfig(t *testing.T) {
@@ -223,12 +224,18 @@ func TestDoltRemotesInterval(t *testing.T) {
 	config := &DaemonPatrolConfig{
 		Patrols: &PatrolsConfig{
 			DoltRemotes: &DoltRemotesConfig{
-				Enabled:  true,
-				Interval: 5 * 60 * 1000000000, // 5 minutes in nanoseconds
+				Enabled:     true,
+				IntervalStr: "5m",
 			},
 		},
 	}
-	if got := doltRemotesInterval(config); got != 5*60*1000000000 {
+	if got := doltRemotesInterval(config); got != 5*time.Minute {
 		t.Errorf("expected 5m interval, got %v", got)
+	}
+
+	// Invalid interval falls back to default
+	config.Patrols.DoltRemotes.IntervalStr = "not-a-duration"
+	if got := doltRemotesInterval(config); got != defaultDoltRemotesInterval {
+		t.Errorf("expected default interval on bad parse, got %v", got)
 	}
 }

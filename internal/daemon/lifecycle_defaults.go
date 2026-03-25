@@ -12,6 +12,7 @@ package daemon
 //   - Dolt Filesystem Backup: every 15m
 //   - Scheduled Maintenance (FLATTEN): daily at 03:00, threshold 1000
 //   - Main Branch Test: every 30m, 10m timeout per rig
+//   - Dolt Remotes: every 15m, disabled by default (opt-in)
 func DefaultLifecycleConfig() *DaemonPatrolConfig {
 	threshold := 1000
 	scrub := true
@@ -57,6 +58,10 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				Enabled:     true,
 				IntervalStr: "30m",
 				TimeoutStr:  "10m",
+			},
+			DoltRemotes: &DoltRemotesConfig{
+				Enabled:     false,
+				IntervalStr: "15m",
 			},
 			Handler: &PatrolConfig{
 				Enabled: true,
@@ -116,6 +121,10 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 	}
 	if p.MainBranchTest == nil {
 		p.MainBranchTest = d.MainBranchTest
+		changed = true
+	}
+	if p.DoltRemotes == nil {
+		p.DoltRemotes = d.DoltRemotes
 		changed = true
 	}
 	if p.Handler == nil {

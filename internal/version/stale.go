@@ -109,6 +109,17 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 			return info
 		}
 
+		// Check if the binary is AHEAD of the repo (repo HEAD is ancestor of
+		// binary commit). This happens when GetRepoRoot finds a stale clone
+		// (e.g., mayor/rig) while the binary was built from a newer clone
+		// (e.g., crew/woodhouse). The binary is newer — not stale.
+		aheadCmd := exec.Command("git", "merge-base", "--is-ancestor", "HEAD", info.BinaryCommit)
+		aheadCmd.Dir = repoDir
+		if aheadCmd.Run() == nil {
+			// Repo HEAD is an ancestor of the binary commit — binary is ahead
+			return info
+		}
+
 		info.IsStale = true
 
 		// Check if this is a forward-only update (binary commit is ancestor of HEAD).

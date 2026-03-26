@@ -632,6 +632,10 @@ func runDogClear(cmd *cobra.Command, args []string) error {
 	if d.Work != "" {
 		fmt.Printf("  Previous work: %s\n", d.Work)
 	}
+
+	// Close any open dispatch mail beads assigned to this dog (same as runDogDone).
+	closeDogDispatchBeads(name, "dog-clear: work cleared")
+
 	return nil
 }
 
@@ -682,6 +686,12 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("✓ Dog %s returned to kennel (idle)\n", name)
 
+	// Close any open dispatch mail beads assigned to this dog.
+	// The dispatch command (runDogDispatch) creates a mail bead via
+	// router.Send() with label "gt:message" and assignee "deacon/dogs/<name>".
+	// Without closing these, dispatch beads accumulate indefinitely.
+	closeDogDispatchBeads(name, "dog-done: work completed")
+
 	// Auto-terminate the tmux session after a short delay.
 	// Dogs run inside tmux sessions (hq-dog-<name>). Without this, the
 	// Claude agent idles at the prompt indefinitely after completing work,
@@ -715,6 +725,46 @@ func splitPathComponents(path string) []string {
 	return strings.FieldsFunc(path, func(r rune) bool {
 		return r == '/' || r == '\\'
 	})
+}
+
+// closeDogDispatchBeads finds and closes open dispatch mail beads assigned to a dog.
+// Dispatch beads are created by runDogDispatch via router.Send() with label "gt:message".
+// This is best-effort: failures are logged as warnings, not propagated.
+func closeDogDispatchBeads(dogName, reason string) {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return
+	}
+
+	b := beads.New(townRoot)
+	dogIdentity := fmt.Sprintf("deacon/dogs/%s", dogName)
+
+	// Query for open dispatch beads. Beads may also be in "hooked" or
+	// "in_progress" status, so query each non-closed status.
+	var ids []string
+	for _, status := range []string{"open", "in_progress", "hooked"} {
+		found, listErr := b.List(beads.ListOptions{
+			Status:   status,
+			Label:    "gt:message",
+			Assignee: dogIdentity,
+		})
+		if listErr != nil {
+			continue
+		}
+		for _, db := range found {
+			ids = append(ids, db.ID)
+		}
+	}
+
+	if len(ids) == 0 {
+		return
+	}
+
+	if closeErr := b.CloseWithReason(reason, ids...); closeErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to close dispatch bead(s): %v\n", closeErr)
+	} else {
+		fmt.Printf("  Closed %d dispatch bead(s)\n", len(ids))
+	}
 }
 
 func runDogStatus(cmd *cobra.Command, args []string) error {

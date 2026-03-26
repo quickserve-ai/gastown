@@ -177,15 +177,29 @@ if ! tmux has-session -t "$DEACON_SESSION" 2>/dev/null; then
   echo "  CRASHED: Deacon session is dead"
   DEACON_ISSUE="crashed"
 else
-  # Check deacon heartbeat file
-  HEARTBEAT_FILE="$TOWN_ROOT/deacon/.deacon-heartbeat"
+  # Check deacon heartbeat file (JSON with timestamp field)
+  HEARTBEAT_FILE="$TOWN_ROOT/deacon/heartbeat.json"
   if [ -f "$HEARTBEAT_FILE" ]; then
-    HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
-    NOW=$(date +%s)
-    HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
+    # Read timestamp from JSON and compute age in seconds
+    HEARTBEAT_TS=$(jq -r '.timestamp // empty' "$HEARTBEAT_FILE" 2>/dev/null)
+    if [ -n "$HEARTBEAT_TS" ]; then
+      HEARTBEAT_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$HEARTBEAT_TS" +%s 2>/dev/null \
+        || date -d "$HEARTBEAT_TS" +%s 2>/dev/null)
+      NOW=$(date +%s)
+      HEARTBEAT_AGE=$(( NOW - HEARTBEAT_EPOCH ))
+    else
+      # Fallback to file mtime if JSON parse fails
+      HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
+      NOW=$(date +%s)
+      HEARTBEAT_AGE=$(( NOW - HEARTBEAT_TIME ))
+    fi
 
-    if [ "$HEARTBEAT_AGE" -gt 600 ]; then
-      echo "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >10m threshold)"
+    # Threshold: 900s (15m) matches HeartbeatVeryStaleThreshold in Go code.
+    # The deacon sleeps 60s+ between patrol cycles and patrol steps can take
+    # several minutes, so the previous 600s (10m) threshold caused frequent
+    # false-positive escalations.
+    if [ "$HEARTBEAT_AGE" -gt 900 ]; then
+      echo "  STUCK: Deacon heartbeat stale (${HEARTBEAT_AGE}s old, >15m threshold)"
       DEACON_ISSUE="stuck_heartbeat_${HEARTBEAT_AGE}s"
     else
       echo "  OK: Deacon heartbeat ${HEARTBEAT_AGE}s old"

@@ -1192,6 +1192,13 @@ type WindowTint struct {
 	// RoleTints overrides window tint themes for specific roles.
 	// Keys: "witness", "refinery", "crew", "polecat"
 	RoleTints map[string]string `json:"role_tints,omitempty"`
+
+	// TintFactor controls how much the window background is darkened when
+	// inheriting from the status bar theme (0.0–1.0). Lower = darker.
+	// Default: 0.4 (40% of status bar brightness).
+	// Only applies when window tint inherits from the status bar theme
+	// (i.e., no explicit name, custom, or role_tints match).
+	TintFactor *float64 `json:"tint_factor,omitempty"`
 }
 
 // BuiltinRoleThemes returns the default themes for each role.

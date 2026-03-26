@@ -98,6 +98,38 @@ func ResolveWindowTint(rig, role string) *tmux.WindowStyle {
 	return nil
 }
 
+// DefaultTintFactor is the default darkening factor for window backgrounds
+// when inheriting from the status bar theme.
+const DefaultTintFactor = 0.4
+
+// ResolveTintFactor returns the tint_factor from the most specific config level.
+// Falls back to DefaultTintFactor if not configured.
+func ResolveTintFactor(rig string) float64 {
+	townRoot, _ := workspace.FindFromCwd()
+
+	// Check per-rig config.
+	if townRoot != "" && rig != "" {
+		settingsPath := filepath.Join(townRoot, rig, "settings", "config.json")
+		if settings, err := config.LoadRigSettings(settingsPath); err == nil {
+			if settings.Theme != nil && settings.Theme.WindowTint != nil && settings.Theme.WindowTint.TintFactor != nil {
+				return *settings.Theme.WindowTint.TintFactor
+			}
+		}
+	}
+
+	// Check global config.
+	if townRoot != "" {
+		mayorConfigPath := filepath.Join(townRoot, "mayor", "config.json")
+		if mayorCfg, err := config.LoadMayorConfig(mayorConfigPath); err == nil {
+			if mayorCfg.Theme != nil && mayorCfg.Theme.WindowTint != nil && mayorCfg.Theme.WindowTint.TintFactor != nil {
+				return *mayorCfg.Theme.WindowTint.TintFactor
+			}
+		}
+	}
+
+	return DefaultTintFactor
+}
+
 // IsWindowTintEnabled checks if window tinting is enabled at any config level.
 // Returns true if enabled explicitly; false if disabled or not configured.
 func IsWindowTintEnabled(rig string) bool {

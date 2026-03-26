@@ -675,9 +675,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// Verify the branch actually exists on remote (GH #1348).
 		// Push can return exit 0 without actually pushing (e.g., stale refs,
 		// worktree/bare-repo state mismatch). Verify before creating MR bead.
-		// Use RemotePushBranchExists to query the push URL, not the fetch URL —
-		// in fork-based workflows these differ and the branch lives on the fork.
-		if exists, verifyErr := g.RemotePushBranchExists("origin", branch); verifyErr != nil {
+		if exists, verifyErr := g.RemoteBranchExists("origin", branch); verifyErr != nil {
 			style.PrintWarning("could not verify push: %v (proceeding optimistically)", verifyErr)
 		} else if !exists {
 			// Push "succeeded" but branch not on remote — try bare repo verification
@@ -686,7 +684,7 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 			bareRepoPath := filepath.Join(rigPath, ".repo.git")
 			if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 				bareGit := git.NewGitWithDir(bareRepoPath, "")
-				exists, verifyErr = bareGit.RemotePushBranchExists("origin", branch)
+				exists, verifyErr = bareGit.RemoteBranchExists("origin", branch)
 			}
 			if verifyErr != nil || !exists {
 				pushFailed = true
@@ -1562,7 +1560,7 @@ func selfNukePolecat(roleInfo RoleInfo, _ string) error {
 	}
 	pushed := false
 	for _, remote := range remotes {
-		exists, err := polecatGit.RemotePushBranchExists(remote, branchName)
+		exists, err := polecatGit.RemoteBranchExists(remote, branchName)
 		if err == nil && exists {
 			pushed = true
 			break

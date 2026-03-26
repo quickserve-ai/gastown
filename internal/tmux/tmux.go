@@ -1725,12 +1725,51 @@ func (t *Tmux) NudgePane(pane, message string) error {
 // Call this after starting the agent and waiting for it to initialize (WaitForCommand),
 // but before sending any prompts. Idempotent: safe to call on sessions without dialogs.
 func (t *Tmux) AcceptStartupDialogs(session string) error {
-	if err := t.AcceptWorkspaceTrustDialog(session); err != nil {
-		return fmt.Errorf("workspace trust dialog: %w", err)
+	// Single polling loop that checks for all dialog types in one pass.
+	// This avoids the problem of sequential timeouts when no dialog is present
+	// (previously 2×DialogPollTimeout if the prompt wasn't detected quickly).
+	deadline := time.Now().Add(constants.DialogPollTimeout)
+
+	trustHandled := false
+	for time.Now().Before(deadline) {
+		content, err := t.CapturePane(session, 30)
+		if err != nil {
+			time.Sleep(constants.DialogPollInterval)
+			continue
+		}
+
+		if !trustHandled {
+			if containsWorkspaceTrustDialog(content) {
+				// Trust dialog found — accept it (option 1 is pre-selected)
+				if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
+					return fmt.Errorf("workspace trust dialog: %w", err)
+				}
+				time.Sleep(500 * time.Millisecond)
+				trustHandled = true
+				continue // Re-poll to check for bypass dialog
+			}
+		}
+
+		// Check for bypass permissions dialog
+		if strings.Contains(content, "Bypass Permissions mode") {
+			if _, err := t.run("send-keys", "-t", session, "Down"); err != nil {
+				return fmt.Errorf("bypass permissions warning: %w", err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			if _, err := t.run("send-keys", "-t", session, "Enter"); err != nil {
+				return fmt.Errorf("bypass permissions warning: %w", err)
+			}
+			return nil
+		}
+
+		// Early exit: prompt visible means no (more) dialogs will appear
+		if containsPromptIndicator(content) {
+			return nil
+		}
+
+		time.Sleep(constants.DialogPollInterval)
 	}
-	if err := t.AcceptBypassPermissionsWarning(session); err != nil {
-		return fmt.Errorf("bypass permissions warning: %w", err)
-	}
+
 	return nil
 }
 

@@ -152,9 +152,9 @@ func TestAcceptStartupDialogs_NoDialogs(t *testing.T) {
 		t.Fatalf("AcceptStartupDialogs: %v", err)
 	}
 
-	// Both dialog checks should early-exit when prompt is visible
-	if elapsed > 12*time.Second {
-		t.Errorf("took %v, expected faster completion", elapsed)
+	// Single polling loop should early-exit when prompt is visible (< 8s timeout)
+	if elapsed > 6*time.Second {
+		t.Errorf("took %v, expected early exit (< 6s)", elapsed)
 	}
 }
 

@@ -676,6 +676,37 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Close the dispatch task bead(s) for this dog before clearing work.
+	// When gt dog dispatch sends plugin instructions, it creates a mail bead
+	// assigned to the dog. These beads were never closed, accumulating at
+	// ~288/day. Close them now that the dog has completed the work.
+	townRoot, _ := workspace.FindFromCwd()
+	if townRoot != "" {
+		b := beads.New(townRoot)
+		dogIdentity := fmt.Sprintf("deacon/dogs/%s", name)
+		issues, listErr := b.List(beads.ListOptions{
+			Status:   "open",
+			Label:    "gt:message",
+			Assignee: dogIdentity,
+			Priority: -1,
+		})
+		if listErr == nil {
+			var dispatchIDs []string
+			for _, issue := range issues {
+				if strings.HasPrefix(issue.Title, "Plugin:") {
+					dispatchIDs = append(dispatchIDs, issue.ID)
+				}
+			}
+			if len(dispatchIDs) > 0 {
+				if closeErr := b.CloseWithReason("dog-done: work completed", dispatchIDs...); closeErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to close dispatch bead(s): %v\n", closeErr)
+				} else {
+					fmt.Printf("✓ Closed %d dispatch task bead(s)\n", len(dispatchIDs))
+				}
+			}
+		}
+	}
+
 	if err := mgr.ClearWork(name); err != nil {
 		return fmt.Errorf("clearing work for dog %s: %w", name, err)
 	}

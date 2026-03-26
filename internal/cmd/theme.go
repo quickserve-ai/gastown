@@ -203,7 +203,11 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 		if theme != nil {
 			theme.Window = session.ResolveWindowTint(rig, role)
 			if theme.Window == nil && session.IsWindowTintEnabled(rig) {
-				theme.Window = &tmux.WindowStyle{BG: theme.BG, FG: theme.FG}
+				factor := session.ResolveTintFactor(rig)
+				theme.Window = &tmux.WindowStyle{
+					BG: tmux.DarkenColor(theme.BG, factor),
+					FG: theme.FG,
+				}
 			}
 		}
 

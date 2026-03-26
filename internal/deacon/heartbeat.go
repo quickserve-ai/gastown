@@ -67,7 +67,23 @@ func WriteHeartbeat(townRoot string, hb *Heartbeat) error {
 		return err
 	}
 
-	return os.WriteFile(hbFile, data, 0600)
+	if err := os.WriteFile(hbFile, data, 0600); err != nil {
+		return err
+	}
+
+	// Also touch .deacon-heartbeat sentinel file.
+	// The stuck-agent-dog plugin checks the mtime of this file
+	// to determine if the Deacon is alive.
+	sentinelFile := filepath.Join(filepath.Dir(hbFile), ".deacon-heartbeat")
+	now := time.Now()
+	if err := os.Chtimes(sentinelFile, now, now); err != nil {
+		// File may not exist yet — create it
+		if f, createErr := os.Create(sentinelFile); createErr == nil {
+			f.Close()
+		}
+	}
+
+	return nil
 }
 
 // ReadHeartbeat reads the Deacon heartbeat from disk.

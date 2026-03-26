@@ -310,6 +310,32 @@ func TestWriteHeartbeat_CreatesDirectory(t *testing.T) {
 	}
 }
 
+func TestWriteHeartbeat_CreatesSentinelFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	// Write heartbeat
+	hb := &Heartbeat{Cycle: 1}
+	if err := WriteHeartbeat(tmpDir, hb); err != nil {
+		t.Fatalf("WriteHeartbeat error: %v", err)
+	}
+
+	// Verify .deacon-heartbeat sentinel file was created
+	sentinelFile := filepath.Join(tmpDir, "deacon", ".deacon-heartbeat")
+	info, err := os.Stat(sentinelFile)
+	if err != nil {
+		t.Fatalf(".deacon-heartbeat sentinel file not created: %v", err)
+	}
+
+	// Verify mtime is recent
+	if time.Since(info.ModTime()) > time.Minute {
+		t.Error(".deacon-heartbeat mtime should be recent")
+	}
+}
+
 func TestWriteHeartbeat_SetsTimestamp(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
 	if err != nil {

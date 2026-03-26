@@ -348,7 +348,7 @@ func TestDispatchWave1_AllDispatched(t *testing.T) {
 	var mu sync.Mutex
 	var dispatched []string
 	orig := dispatchTaskDirect
-	dispatchTaskDirect = func(townRoot, beadID, rig string) error {
+	dispatchTaskDirect = func(townRoot, beadID, rig, baseBranch string) error {
 		mu.Lock()
 		dispatched = append(dispatched, beadID)
 		mu.Unlock()
@@ -356,7 +356,7 @@ func TestDispatchWave1_AllDispatched(t *testing.T) {
 	}
 	t.Cleanup(func() { dispatchTaskDirect = orig })
 
-	results, err := dispatchWave1("test-convoy", dag, waves, "")
+	results, err := dispatchWave1("test-convoy", dag, waves, "", "")
 	if err != nil {
 		t.Fatalf("dispatchWave1: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestDispatchWave1_ContinuesOnFailure(t *testing.T) {
 	var mu sync.Mutex
 	var attempted []string
 	orig := dispatchTaskDirect
-	dispatchTaskDirect = func(townRoot, beadID, rig string) error {
+	dispatchTaskDirect = func(townRoot, beadID, rig, baseBranch string) error {
 		mu.Lock()
 		attempted = append(attempted, beadID)
 		mu.Unlock()
@@ -416,7 +416,7 @@ func TestDispatchWave1_ContinuesOnFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { dispatchTaskDirect = orig })
 
-	results, err := dispatchWave1("test-convoy", dag, waves, "")
+	results, err := dispatchWave1("test-convoy", dag, waves, "", "")
 	if err != nil {
 		t.Fatalf("dispatchWave1: %v", err)
 	}
@@ -665,7 +665,7 @@ func TestDispatchWave1_EndToEnd(t *testing.T) {
 	var mu sync.Mutex
 	var dispatched []string
 	orig := dispatchTaskDirect
-	dispatchTaskDirect = func(townRoot, beadID, rig string) error {
+	dispatchTaskDirect = func(townRoot, beadID, rig, baseBranch string) error {
 		mu.Lock()
 		dispatched = append(dispatched, beadID)
 		mu.Unlock()
@@ -685,7 +685,7 @@ func TestDispatchWave1_EndToEnd(t *testing.T) {
 		t.Fatalf("computeWaves: %v", err)
 	}
 
-	results, err := dispatchWave1("hq-cv-e2e", dag, waves, "")
+	results, err := dispatchWave1("hq-cv-e2e", dag, waves, "", "")
 	if err != nil {
 		t.Fatalf("dispatchWave1: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	beadspkg "github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -25,8 +26,13 @@ type DispatchResult struct {
 // dispatchTaskDirect dispatches a single task to its rig.
 // In production, this delegates to gt sling. Tests override this variable
 // with a stub to avoid spawning real processes.
-var dispatchTaskDirect = func(townRoot, beadID, rig string) error {
-	cmd := exec.Command("gt", "sling", beadID, rig)
+// baseBranch is passed as --base-branch to gt sling when non-empty.
+var dispatchTaskDirect = func(townRoot, beadID, rig, baseBranch string) error {
+	args := []string{"sling", beadID, rig}
+	if baseBranch != "" {
+		args = append(args, "--base-branch="+baseBranch)
+	}
+	cmd := exec.Command("gt", args...)
 	cmd.Dir = townRoot
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -159,7 +165,8 @@ func checkBlockedRigsForLaunch(dag *ConvoyDAG, townRoot string, force bool) erro
 // Individual task failures do not abort remaining dispatches (I-14).
 // Returns a result for every Wave 1 task and a non-nil error only if waves
 // are empty or contain no Wave 1.
-func dispatchWave1(convoyID string, dag *ConvoyDAG, waves []Wave, townRoot string) ([]DispatchResult, error) {
+// baseBranch is forwarded to dispatchTaskDirect for convoy-level branch override.
+func dispatchWave1(convoyID string, dag *ConvoyDAG, waves []Wave, townRoot, baseBranch string) ([]DispatchResult, error) {
 	if len(waves) == 0 {
 		return nil, fmt.Errorf("convoy %s: no waves to dispatch", convoyID)
 	}
@@ -177,7 +184,7 @@ func dispatchWave1(convoyID string, dag *ConvoyDAG, waves []Wave, townRoot strin
 			rig = node.Rig
 		}
 
-		err := dispatchTaskDirect(townRoot, taskID, rig)
+		err := dispatchTaskDirect(townRoot, taskID, rig, baseBranch)
 		results = append(results, DispatchResult{
 			BeadID:  taskID,
 			Rig:     rig,
@@ -313,7 +320,13 @@ func runConvoyLaunch(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			results, err := dispatchWave1(convoyID, dag, waves, townRoot)
+			// Extract convoy base_branch so Wave 1 tasks target the correct branch.
+			var baseBranch string
+			if cf := beadspkg.ParseConvoyFields(&beadspkg.Issue{Description: result.Description}); cf != nil {
+				baseBranch = cf.BaseBranch
+			}
+
+			results, err := dispatchWave1(convoyID, dag, waves, townRoot, baseBranch)
 			if err != nil {
 				return fmt.Errorf("dispatch wave 1: %w", err)
 			}

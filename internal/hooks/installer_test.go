@@ -9,7 +9,7 @@ import (
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
-	// Claude has autonomous/interactive variants
+	// Claude has autonomous/interactive variants with {{GT_BIN}} substitution
 	tests := []struct {
 		name     string
 		role     string
@@ -34,11 +34,23 @@ func TestInstallForRole_RoleAware(t *testing.T) {
 				t.Fatal("settings.json not created")
 			}
 
-			// Verify content matches expected template
+			// Verify content matches resolved template (with {{GT_BIN}} substituted)
 			got, _ := os.ReadFile(path)
-			want, _ := templateFS.ReadFile("templates/claude/" + tt.wantFile)
+			want, err := resolveAndSubstitute("claude", "settings.json", tt.role)
+			if err != nil {
+				t.Fatalf("resolveAndSubstitute: %v", err)
+			}
 			if string(got) != string(want) {
 				t.Errorf("content mismatch: got %d bytes, want %d bytes (from %s)", len(got), len(want), tt.wantFile)
+			}
+
+			// Verify {{GT_BIN}} was substituted (should not appear in output)
+			if strings.Contains(string(got), "{{GT_BIN}}") {
+				t.Error("{{GT_BIN}} placeholder was not substituted")
+			}
+			// Verify no legacy export PATH pattern
+			if strings.Contains(string(got), "export PATH=") {
+				t.Error("legacy export PATH pattern still present")
 			}
 		})
 	}

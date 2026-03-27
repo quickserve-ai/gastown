@@ -464,6 +464,171 @@ func runAccountSwitch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var accountAdoptCmd = &cobra.Command{
+	Use:   "adopt <handle>",
+	Short: "Copy auth from ~/.claude to an account directory",
+	Long: `Populate an account's config directory with auth state from ~/.claude.
+
+This is safe to run mid-session — it copies files, not moves them.
+After adopt, polecats spawned with this account will not need interactive login.
+
+Use this when you've added an account (gt account add) and set it as default,
+but haven't run gt account switch yet. Without adopt, polecats get an empty
+config directory and prompt for interactive OAuth login.
+
+Examples:
+  gt account adopt work       # Copy auth from ~/.claude to work account dir
+  gt account adopt qconcierge # Populate qconcierge with existing auth`,
+	Args: cobra.ExactArgs(1),
+	RunE: runAccountAdopt,
+}
+
+// authFiles are the files/directories to copy from ~/.claude to populate auth.
+// These are the minimum needed for Claude Code to recognize an authenticated session.
+var authFiles = []string{
+	".claude.json",              // Session config, auth tokens
+	"settings.json",            // User settings
+	"mcp-needs-auth-cache.json", // MCP auth state
+	"session-env",              // Session environment
+}
+
+func runAccountAdopt(cmd *cobra.Command, args []string) error {
+	handle := args[0]
+
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		return fmt.Errorf("finding town root: %w", err)
+	}
+
+	accountsPath := constants.MayorAccountsPath(townRoot)
+	cfg, err := config.LoadAccountsConfig(accountsPath)
+	if err != nil {
+		return fmt.Errorf("loading accounts config: %w", err)
+	}
+
+	acct := cfg.GetAccount(handle)
+	if acct == nil {
+		return fmt.Errorf("account '%s' not found", handle)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("getting home directory: %w", err)
+	}
+	claudeDir := filepath.Join(home, ".claude")
+
+	// Verify ~/.claude exists and is a real directory (not symlink to account dir)
+	info, err := os.Lstat(claudeDir)
+	if err != nil {
+		return fmt.Errorf("~/.claude not found: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, _ := os.Readlink(claudeDir)
+		if target == acct.ConfigDir {
+			fmt.Printf("~/.claude already points to %s — nothing to adopt\n", acct.ConfigDir)
+			return nil
+		}
+	}
+
+	// Ensure target config dir exists
+	if err := os.MkdirAll(acct.ConfigDir, 0755); err != nil {
+		return fmt.Errorf("creating config directory: %w", err)
+	}
+
+	// Copy auth files
+	copied := 0
+	for _, name := range authFiles {
+		src := filepath.Join(claudeDir, name)
+		dst := filepath.Join(acct.ConfigDir, name)
+
+		srcInfo, err := os.Stat(src)
+		if err != nil {
+			continue // Skip files that don't exist in source
+		}
+
+		// Skip if destination already exists and is newer
+		if dstInfo, err := os.Stat(dst); err == nil {
+			if dstInfo.ModTime().After(srcInfo.ModTime()) {
+				continue
+			}
+		}
+
+		if srcInfo.IsDir() {
+			if err := copyDir(src, dst); err != nil {
+				style.PrintWarning("failed to copy %s: %v", name, err)
+				continue
+			}
+		} else {
+			if err := copyFile(src, dst); err != nil {
+				style.PrintWarning("failed to copy %s: %v", name, err)
+				continue
+			}
+		}
+		copied++
+	}
+
+	// Ensure shared commands symlink
+	if err := ensureSharedCommandsSymlink(acct.ConfigDir); err != nil {
+		style.PrintWarning("could not symlink global commands: %v", err)
+	}
+
+	if copied == 0 {
+		fmt.Printf("Account '%s' already up to date\n", handle)
+	} else {
+		fmt.Printf("Adopted auth from ~/.claude to '%s' (%d items copied)\n", handle, copied)
+		fmt.Printf("Config dir: %s\n", acct.ConfigDir)
+		fmt.Println("\nNew polecats using this account will not need interactive login.")
+	}
+
+	return nil
+}
+
+// copyFile copies a single file preserving permissions.
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, info.Mode())
+}
+
+// copyDir recursively copies a directory.
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ensureSharedCommandsSymlink creates a symlink from configDir/commands to the
 // global commands directory (~/.claude/commands) so that custom commands (e.g.,
 // SuperClaude) are available regardless of which account is active via CLAUDE_CONFIG_DIR.
@@ -516,6 +681,7 @@ func init() {
 	accountCmd.AddCommand(accountDefaultCmd)
 	accountCmd.AddCommand(accountStatusCmd)
 	accountCmd.AddCommand(accountSwitchCmd)
+	accountCmd.AddCommand(accountAdoptCmd)
 
 	rootCmd.AddCommand(accountCmd)
 }

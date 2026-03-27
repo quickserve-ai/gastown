@@ -901,6 +901,55 @@ func TestResolve_MonorepoTDD(t *testing.T) {
 	}
 }
 
+// TestParse_DesignDocToBeads verifies the design-doc-to-beads formula parses,
+// validates, and has correct step structure.
+func TestParse_DesignDocToBeads(t *testing.T) {
+	data, err := GetEmbeddedFormulaContent("design-doc-to-beads")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+
+	f, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if f.Type != TypeWorkflow {
+		t.Errorf("Type = %q, want %q", f.Type, TypeWorkflow)
+	}
+
+	wantIDs := []string{"review", "human-gate", "apply-fixes", "create-beads", "verify-beads-pass-1", "verify-beads-pass-2"}
+	if len(f.Steps) != len(wantIDs) {
+		t.Fatalf("got %d steps, want %d", len(f.Steps), len(wantIDs))
+	}
+
+	sorted, err := f.TopologicalSort()
+	if err != nil {
+		t.Fatalf("TopologicalSort: %v", err)
+	}
+	for i, want := range wantIDs {
+		if sorted[i] != want {
+			t.Errorf("sorted[%d] = %q, want %q", i, sorted[i], want)
+		}
+	}
+
+	// All steps should have acceptance criteria.
+	for _, step := range f.Steps {
+		if step.Acceptance == "" {
+			t.Errorf("step %q has no acceptance criteria", step.ID)
+		}
+	}
+
+	// Verify required variable.
+	designDoc, ok := f.Vars["design_doc"]
+	if !ok {
+		t.Fatal("missing design_doc variable")
+	}
+	if !designDoc.Required {
+		t.Error("design_doc should be required")
+	}
+}
+
 // stepIDs returns the IDs of all steps in a formula for test diagnostics.
 func stepIDs(f *Formula) []string {
 	ids := make([]string, len(f.Steps))

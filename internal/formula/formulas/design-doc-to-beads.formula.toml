@@ -1,0 +1,520 @@
+description = """
+Lighter alternative to mol-idea-to-plan for when a design document already exists.
+Skips PRD intake, design generation, and PRD alignment rounds entirely.
+Reviews the existing doc, gets human sign-off, then converts to dispatchable beads.
+
+## Pipeline
+
+```
+[input]          Existing design doc path + context
+      ↓
+[review]         5 parallel review polecats:
+                 completeness, sequencing, testability, risk, scope
+      ↓
+[human-gate]     Present findings + questions to human
+      ↓
+[apply-fixes]    Incorporate human answers, update design doc
+      ↓
+[create-beads]   Convert reviewed design into beads with dependencies
+      ↓
+[verify-beads]   2-pass verification (plan items ↔ beads coverage)
+```
+
+## Comparison with mol-idea-to-plan
+- NO PRD intake (doc already exists)
+- NO design generation (design already exists)
+- NO PRD alignment rounds (no PRD to align against)
+- 5 parallel reviewers, 1 round instead of 6 rounds × 2 polecats
+- ~5 polecats total instead of ~22
+- Human gate is the only pause point
+
+## Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| design_doc | yes | Path to existing design document |
+| context | no | Additional constraints, related beads, prior decisions |
+"""
+formula = "design-doc-to-beads"
+type = "workflow"
+version = 1
+
+# ============================================================================
+# STEP 1: PARALLEL REVIEW
+# ============================================================================
+
+[[steps]]
+id = "review"
+title = "Review design document (5 parallel polecats)"
+acceptance = "All 5 review reports received via mail"
+description = """
+Dispatch 5 polecats to review the existing design document in parallel.
+Each examines a different quality dimension.
+
+**1. Read the design doc first:**
+```bash
+cat {{design_doc}}
+```
+
+Skim the doc to understand its structure. Note the section headings — you'll
+reference them when dispatching reviewers.
+
+**2. Dispatch 5 review polecats in parallel:**
+
+Polecat 1 — **completeness**:
+```bash
+gt sling --prompt="Review an existing design document for completeness.
+
+Read the design doc: {{design_doc}}
+{{context}}
+
+Check for:
+- Missing infrastructure setup (build config, CI, env vars, feature flags)
+- Missing data migrations or schema changes
+- Missing test tasks (unit, integration, e2e)
+- Missing documentation updates
+- Missing error handling or rollback procedures
+- Implicit dependencies not called out as tasks
+- Tasks too coarse-grained to be actionable
+- Missing acceptance criteria for any work item
+
+Report format for each finding:
+- FINDING: <what's missing or incomplete>
+  Severity: must-fix | should-fix
+  Suggested addition: <specific task or expansion to add>
+
+Mail your full report back when done." --mail-back
+```
+
+Polecat 2 — **sequencing**:
+```bash
+gt sling --prompt="Review an existing design document for correct sequencing.
+
+Read the design doc: {{design_doc}}
+{{context}}
+
+Check the ordering and dependencies of all phases and tasks:
+- Are tasks in the right order? Would any task fail if executed in sequence?
+- Are there hidden dependencies (task X needs task Y but doesn't say so)?
+- Are there unnecessary serial dependencies (tasks that could be parallelized)?
+- Is there a critical path? Is it the shortest possible?
+- Are there circular dependencies?
+
+Report format for each finding:
+- FINDING: <sequencing issue>
+  Severity: must-fix | should-fix
+  Suggested reorder: <how to fix the sequence>
+
+Mail your full report back when done." --mail-back
+```
+
+Polecat 3 — **testability**:
+```bash
+gt sling --prompt="Review an existing design document for testability.
+
+Read the design doc: {{design_doc}}
+{{context}}
+
+For each task/phase in the doc, check:
+- Does it have clear acceptance criteria? (How do we know it's done?)
+- Can the acceptance criteria be verified automatically (test, script, query)?
+- Are there tasks for writing tests, or are tests assumed but not planned?
+- Is there an integration test or e2e test that validates the whole feature?
+- Can each phase be independently verified before moving to the next?
+
+Report format:
+- UNTESTABLE: <task> — no clear way to verify completion. Suggested criteria: ...
+- MISSING-TEST: <task> — needs a test task added. Suggested: ...
+- VAGUE-CRITERIA: <task> — acceptance criteria too vague. Suggested rewrite: ...
+
+Classify each as must-fix or should-fix.
+Mail your full report back when done." --mail-back
+```
+
+Polecat 4 — **risk**:
+```bash
+gt sling --prompt="Review an existing design document for risks.
+
+Read the design doc: {{design_doc}}
+{{context}}
+
+Identify risks in the plan:
+- Technical risks: unproven approaches, complex integrations, performance unknowns
+- Dependency risks: external services, third-party libraries, API stability
+- Knowledge risks: areas requiring expertise not mentioned in the doc
+- Rollback risks: what if a phase fails mid-execution? Is there a recovery path?
+- Missing spike/POC tasks for high-uncertainty items
+
+Report format for each risk:
+- RISK: <description>
+  Impact: HIGH | MEDIUM | LOW
+  Likelihood: HIGH | MEDIUM | LOW
+  Mitigation: must-fix | should-fix
+  Suggested action: <add spike, add fallback plan, add monitoring, etc.>
+
+Mail your full report back when done." --mail-back
+```
+
+Polecat 5 — **scope**:
+```bash
+gt sling --prompt="Review an existing design document for scope issues.
+
+Read the design doc: {{design_doc}}
+{{context}}
+
+Look for unnecessary or misscoped work:
+- Gold-plating: tasks that go beyond what's needed for the stated goals
+- Premature optimization: performance work before proving it's needed
+- Over-engineering: abstractions, frameworks, or generalization beyond requirements
+- Nice-to-haves disguised as requirements
+- Tasks that could be deferred to a follow-up without impacting the core feature
+- Missing out-of-scope statements
+- Unclear prioritization between requirements if tradeoffs arise
+
+Report format:
+- CUT: <task/section> — unnecessary because... Suggested action: remove or defer
+- SIMPLIFY: <task/section> — over-engineered. Simpler approach: ...
+- DEFER: <task/section> — not needed for MVP. Move to follow-up.
+
+Classify each as must-fix or should-fix.
+Mail your full report back when done." --mail-back
+```
+
+**3. Await all 5 reports:**
+```bash
+gt mail inbox  # wait for all 5 polecats to report back
+```
+
+Read all 5 reports. Consolidate findings into a single review summary file:
+`.doc-reviews/review-summary.md`
+
+Group findings by severity (must-fix first), deduplicate overlapping findings
+across reviewers (these are higher-confidence gaps), and extract questions
+that need human input.
+
+**Exit criteria:** All 5 reports received. Consolidated summary written."""
+
+# ============================================================================
+# STEP 2: HUMAN GATE
+# ============================================================================
+
+[[steps]]
+id = "human-gate"
+title = "Present findings and questions to human"
+needs = ["review"]
+acceptance = "Human has answered critical questions in conversation"
+description = """
+Present the consolidated review findings to the human and capture their answers.
+
+This is a human gate. The molecule pauses here until you have answers.
+
+**1. Read the consolidated summary:**
+```bash
+cat .doc-reviews/review-summary.md
+```
+
+**2. Present to the human in conversation:**
+
+Output:
+```
+## Design Review Complete: {{design_doc}}
+
+### Overall Assessment
+<1-2 sentence summary: health of the design doc, biggest risks, readiness>
+
+### Must-Fix Issues
+<list all must-fix findings — these block bead creation>
+
+### Should-Fix Issues
+<list all should-fix findings — recommended but won't block>
+
+### Questions Needing Your Input
+<numbered list of questions extracted from review, prioritized>
+
+---
+Please reply with numbered answers matching the questions above.
+For must-fix issues, indicate whether to fix, defer, or accept the risk.
+I'll update the design doc and proceed to bead creation.
+```
+
+**3. Await reply:**
+Wait for the human to respond in this conversation. They will type their
+answers directly. Do NOT use `gt mail inbox` — the reply comes in chat.
+
+**Exit criteria:** Human has answered the critical questions and addressed must-fix items."""
+
+# ============================================================================
+# STEP 3: APPLY FIXES
+# ============================================================================
+
+[[steps]]
+id = "apply-fixes"
+title = "Incorporate human answers and update design doc"
+needs = ["human-gate"]
+acceptance = "Design doc updated with review fixes and human clarifications"
+description = """
+Apply the human's answers and review findings to the design document.
+
+**1. Read the human's answers** (from the conversation above).
+
+**2. Update the design doc:**
+```bash
+# Edit the design doc directly
+```
+
+For each must-fix the human approved:
+- Edit the relevant section of {{design_doc}}
+- Add missing tasks, acceptance criteria, risk mitigations, etc.
+
+For each should-fix:
+- Apply if the human agreed, skip if deferred
+
+**3. Add a review appendix to the design doc:**
+
+Append to the bottom of {{design_doc}}:
+```markdown
+## Review Log
+
+### Review Date
+<today's date>
+
+### Reviewers
+5 parallel polecats: completeness, sequencing, testability, risk, scope
+
+### Changes Applied
+- <list of changes made based on review>
+
+### Human Clarifications
+- Q: <question>
+  A: <human's answer>
+...
+
+### Deferred Items
+- <items explicitly deferred by human, with rationale>
+```
+
+**4. Commit the updated doc:**
+```bash
+git add {{design_doc}}
+git commit -m "docs: incorporate review feedback into design doc"
+```
+
+**Exit criteria:** Design doc updated with all approved fixes and human clarifications. Changes committed."""
+
+# ============================================================================
+# STEP 4: CREATE BEADS
+# ============================================================================
+
+[[steps]]
+id = "create-beads"
+title = "Convert reviewed design into beads with dependencies"
+needs = ["apply-fixes"]
+acceptance = "All plan tasks exist as beads with correct dependency wiring"
+description = """
+Convert the reviewed, human-approved design document into dispatchable beads.
+
+**1. Read the updated design doc:**
+```bash
+cat {{design_doc}}
+```
+
+**2. Identify work items:**
+
+Walk through every section, phase, and task in the design doc. Each discrete
+work item becomes a bead. Look for:
+- Explicitly listed tasks/phases
+- Implicit tasks (migrations, config changes, test tasks mentioned in passing)
+- Cross-cutting concerns (feature flags, documentation, monitoring)
+
+**3. Create beads:**
+
+For each work item:
+```bash
+bd create --title="<task title>" --type=task --description="
+## Context
+From design doc: {{design_doc}}
+
+## What
+<task description from design doc>
+
+## Acceptance Criteria
+<specific, verifiable criteria>
+
+## Notes
+<relevant details, file paths, technical notes from design doc>
+"
+```
+
+**4. Wire dependencies:**
+
+Based on the sequencing in the design doc:
+```bash
+bd dep add <task-x-id> <task-y-id>  # x depends on y (y blocks x)
+```
+
+**5. Create a tracking epic:**
+```bash
+bd create --title="<feature name from design doc>" --type=epic --description="
+Implementation of design: {{design_doc}}
+
+## Planning Artifacts
+- Design Doc: {{design_doc}}
+- Review Summary: .doc-reviews/review-summary.md
+"
+```
+
+**6. Verify the dependency graph:**
+```bash
+bd blocked  # should show clean topological order
+bd ready    # at least one task should be unblocked
+```
+
+**7. Notify the human in conversation:**
+
+Output:
+```
+## Beads Created
+
+### Summary
+<list of created beads with IDs and titles>
+
+### Dependency Graph
+- Ready to start: <bd ready count>
+- Blocked: <bd blocked count>
+
+### Next Steps
+- Review beads: bd list --type=task
+- Start work: bd ready
+- Dispatch: gt sling <first-bead-id> <rig>
+```
+
+**Exit criteria:** All work items exist as beads. Dependencies wired. Epic created."""
+
+# ============================================================================
+# STEP 5: VERIFY BEADS (2 passes)
+# ============================================================================
+
+[[steps]]
+id = "verify-beads-pass-1"
+title = "Verify beads coverage against design doc (pass 1)"
+needs = ["create-beads"]
+acceptance = "All design doc tasks have corresponding beads after this pass"
+description = """
+First pass: find gaps between the design document and the beads just created.
+
+**1. Re-read the design doc from scratch:**
+```bash
+cat {{design_doc}}
+```
+
+**2. List all beads just created:**
+```bash
+bd list --status=open
+```
+
+For each bead, read its full content:
+```bash
+bd show <id>
+```
+
+**3. Systematically compare:**
+
+Walk through every section, phase, and task in the design doc. For each
+discrete work item, verify a corresponding bead exists that covers it. Check:
+
+- Does a bead exist for this work item?
+- Does the bead's description capture the key requirements?
+- Are acceptance criteria present and specific?
+- Are file paths and technical details preserved?
+
+**4. Create missing beads:**
+
+For any item not covered:
+```bash
+bd create --title="<task>" --type=task --description="
+## Context
+Gap found in verify-beads pass 1. In the design doc but not captured
+in initial bead creation.
+
+## What
+<task description from design doc>
+
+## Acceptance Criteria
+<derived from design doc>
+"
+```
+
+Wire dependencies for newly created beads:
+```bash
+bd dep add <new-bead> <dependency-bead>
+```
+
+**5. Report what you found.** If no gaps: say so explicitly.
+
+**Exit criteria:** All design doc items have corresponding beads after this pass."""
+
+[[steps]]
+id = "verify-beads-pass-2"
+title = "Verify beads coverage against design doc (pass 2)"
+needs = ["verify-beads-pass-1"]
+acceptance = "Second pass complete, zero or near-zero gaps, final report delivered to human"
+description = """
+Second pass: re-read the design doc from scratch and verify coverage again.
+
+This catches items missed in pass 1 due to context, ordering, or implicit
+requirements that only become visible after the first pass filled gaps.
+
+**Same process as pass 1, plus additional checks:**
+
+1. Re-read the full design doc
+2. List ALL beads (including those created in pass 1)
+3. Walk through every section again — fresh eyes
+4. Create beads for any remaining gaps
+5. Wire dependencies
+
+**Additional checks this pass:**
+- Implicit requirements mentioned in passing but not discrete tasks
+  (e.g., "update exports", "run migrations", "add tests")
+- Cross-cutting concerns mentioned across multiple phases
+  (e.g., feature flags, config changes, documentation updates)
+- Beads with descriptions too vague to be actionable — update with specifics
+- Dependency graph integrity: `bd blocked` shows clean topological order
+
+**Final report to human in conversation:**
+
+Output:
+```
+## Beads Verified: {{design_doc}}
+
+### Coverage
+- Total beads: <count>
+- Created in initial pass: <count>
+- Added in verification pass 1: <count>
+- Added in verification pass 2: <count>
+
+### Dependency Graph
+- Ready to start: <bd ready count>
+- Blocked: <bd blocked count>
+
+### Confidence
+<HIGH if 0 gaps in pass 2, MEDIUM if 1-2 gaps found>
+
+### Ready to dispatch
+gt sling <first-ready-bead> <rig>
+```
+
+**Exit criteria:** Two passes complete. Zero gaps in final pass. Human notified."""
+
+# ============================================================================
+# VARIABLES
+# ============================================================================
+
+[vars]
+[vars.design_doc]
+description = "Path to the existing design document"
+required = true
+
+[vars.context]
+description = "Additional context: constraints, related beads, prior decisions"
+required = false
+default = ""

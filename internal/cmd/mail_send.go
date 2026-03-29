@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -71,11 +72,24 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Determine sender
+	// Determine sender (--from overrides auto-detection for cross-town relay)
 	from := detectSender()
+	if mailSendFrom != "" {
+		from = mailSendFrom
+	}
+
+	// For cross-town relay: prepend timestamp block to body when --sent-at is provided
+	body := mailBody
+	if mailSentAt != "" {
+		sentAt, err := time.Parse(time.RFC3339, mailSentAt)
+		if err != nil {
+			return fmt.Errorf("invalid --sent-at timestamp (expected RFC3339): %w", err)
+		}
+		body = formatCrosstownTimestamps(sentAt, time.Now()) + body
+	}
 
 	// Create message with auto-generated ID and thread ID
-	msg := mail.NewMessage(from, to, mailSubject, mailBody)
+	msg := mail.NewMessage(from, to, mailSubject, body)
 
 	// Set priority (--urgent overrides --priority)
 	if mailUrgent {
@@ -225,6 +239,15 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// formatCrosstownTimestamps returns a timestamp block to prepend to a message body
+// for cross-town relay. sentAt is the original send time (from the xtm bead's
+// created_at) and deliveredAt is the relay time.
+func formatCrosstownTimestamps(sentAt, deliveredAt time.Time) string {
+	return fmt.Sprintf("sent_at: %s\ndelivered_at: %s\n\n",
+		sentAt.UTC().Format(time.RFC3339),
+		deliveredAt.UTC().Format(time.RFC3339))
 }
 
 // generateThreadID creates a random thread ID for new message threads.

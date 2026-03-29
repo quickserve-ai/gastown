@@ -31,7 +31,9 @@ var (
 	mailThreadJSON    bool
 	mailReplySubject  string
 	mailReplyMessage  string
-	mailStdin         bool // Read message body from stdin
+	mailStdin         bool   // Read message body from stdin
+	mailSendFrom      string // --from flag: override sender identity
+	mailSentAt        string // --sent-at flag: original send timestamp (RFC3339) for cross-town relay
 
 	// Search flags
 	mailSearchFrom    string
@@ -472,6 +474,8 @@ func init() {
 	mailSendCmd.Flags().StringVar(&mailTo, "to", "", "Recipient address (alternative to positional argument)")
 	mailSendCmd.Flags().BoolVar(&mailSendSelf, "self", false, "Send to self (auto-detect from cwd)")
 	mailSendCmd.Flags().StringArrayVar(&mailCC, "cc", nil, "CC recipients (can be used multiple times)")
+	mailSendCmd.Flags().StringVar(&mailSendFrom, "from", "", "Override sender address (for cross-town relay)")
+	mailSendCmd.Flags().StringVar(&mailSentAt, "sent-at", "", "Original send timestamp in RFC3339 (for cross-town relay)")
 	_ = mailSendCmd.MarkFlagRequired("subject") // cobra flags: error only at runtime if missing
 
 	// Inbox flags

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -317,6 +318,72 @@ func TestAccountSwitch(t *testing.T) {
 		movedMarker := filepath.Join(workConfigDir, "marker.txt")
 		if _, err := os.Stat(movedMarker); err != nil {
 			t.Errorf("marker file not moved to work config dir: %v", err)
+		}
+	})
+
+	t.Run("switch pre-seeds onboarding in empty target dir", func(t *testing.T) {
+		townRoot, accountsDir := setupTestTownForAccount(t)
+
+		fakeHome := t.TempDir()
+		setTestHome(t, fakeHome)
+
+		workConfigDir := filepath.Join(accountsDir, "work")
+		personalConfigDir := filepath.Join(accountsDir, "personal")
+		if err := os.MkdirAll(workConfigDir, 0755); err != nil {
+			t.Fatalf("mkdir work config: %v", err)
+		}
+		if err := os.MkdirAll(personalConfigDir, 0755); err != nil {
+			t.Fatalf("mkdir personal config: %v", err)
+		}
+
+		accountsPath := filepath.Join(townRoot, "mayor", "accounts.json")
+		accountsCfg := config.NewAccountsConfig()
+		accountsCfg.Accounts["work"] = config.Account{
+			Email:     "steve@work.com",
+			ConfigDir: workConfigDir,
+		}
+		accountsCfg.Accounts["personal"] = config.Account{
+			Email:     "steve@personal.com",
+			ConfigDir: personalConfigDir,
+		}
+		accountsCfg.Default = "work"
+		if err := config.SaveAccountsConfig(accountsPath, accountsCfg); err != nil {
+			t.Fatalf("save accounts.json: %v", err)
+		}
+
+		// Create symlink to work
+		claudeDir := filepath.Join(fakeHome, ".claude")
+		if err := os.Symlink(workConfigDir, claudeDir); err != nil {
+			t.Fatalf("create symlink: %v", err)
+		}
+
+		originalWd, _ := os.Getwd()
+		defer os.Chdir(originalWd)
+		if err := os.Chdir(townRoot); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+
+		// Switch to personal (empty dir — no .claude.json)
+		cmd := &cobra.Command{}
+		err := runAccountSwitch(cmd, []string{"personal"})
+		if err != nil {
+			t.Fatalf("runAccountSwitch failed: %v", err)
+		}
+
+		// Verify .claude.json was pre-seeded in personal config dir
+		claudeJSON := filepath.Join(personalConfigDir, ".claude.json")
+		data, err := os.ReadFile(claudeJSON)
+		if err != nil {
+			t.Fatalf("pre-seeded .claude.json not found: %v", err)
+		}
+
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("invalid .claude.json: %v", err)
+		}
+
+		if completed, ok := parsed["hasCompletedOnboarding"].(bool); !ok || !completed {
+			t.Errorf("hasCompletedOnboarding should be true, got %v", parsed["hasCompletedOnboarding"])
 		}
 	})
 }

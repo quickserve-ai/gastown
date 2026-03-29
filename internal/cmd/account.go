@@ -445,6 +445,11 @@ func runAccountSwitch(cmd *cobra.Command, args []string) error {
 	}
 	// If ~/.claude doesn't exist, that's fine - we'll create the symlink
 
+	// Pre-seed .claude.json in target dir to skip the first-run wizard (gt-1ob).
+	// Without this, Claude Code shows an interactive onboarding flow (theme picker,
+	// ToS) that agents can't navigate, freezing every session.
+	ensureOnboardingComplete(targetAcct.ConfigDir)
+
 	// Create symlink to target account
 	if err := os.Symlink(targetAcct.ConfigDir, claudeDir); err != nil {
 		return fmt.Errorf("creating symlink to %s: %w", targetAcct.ConfigDir, err)
@@ -462,6 +467,42 @@ func runAccountSwitch(cmd *cobra.Command, args []string) error {
 	fmt.Println(style.Warning.Render("⚠️  Restart Claude Code for the change to take effect"))
 
 	return nil
+}
+
+// ensureOnboardingComplete writes minimal .claude.json flags so Claude Code
+// skips the first-run setup wizard. Only writes if .claude.json is missing or
+// doesn't already have hasCompletedOnboarding set.
+func ensureOnboardingComplete(configDir string) {
+	claudeJSON := filepath.Join(configDir, ".claude.json")
+
+	// Check if already onboarded
+	if data, err := os.ReadFile(claudeJSON); err == nil {
+		var existing map[string]interface{}
+		if json.Unmarshal(data, &existing) == nil {
+			if completed, ok := existing["hasCompletedOnboarding"].(bool); ok && completed {
+				return // Already onboarded
+			}
+			// Exists but not onboarded — add the flag
+			existing["hasCompletedOnboarding"] = true
+			if _, ok := existing["numStartups"]; !ok {
+				existing["numStartups"] = 1
+			}
+			if updated, err := json.MarshalIndent(existing, "", "  "); err == nil {
+				_ = os.WriteFile(claudeJSON, updated, 0600)
+			}
+			return
+		}
+	}
+
+	// No .claude.json — create minimal one
+	_ = os.MkdirAll(configDir, 0755)
+	seed := map[string]interface{}{
+		"hasCompletedOnboarding": true,
+		"numStartups":           1,
+	}
+	if data, err := json.MarshalIndent(seed, "", "  "); err == nil {
+		_ = os.WriteFile(claudeJSON, data, 0600)
+	}
 }
 
 // ensureSharedCommandsSymlink creates a symlink from configDir/commands to the

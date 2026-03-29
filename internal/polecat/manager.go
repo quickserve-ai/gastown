@@ -787,6 +787,8 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		style.PrintWarning("could not install runtime settings: %v", err)
 	}
 
+	ensureWorktreeSettings(clonePath, polecatSettingsDir)
+
 	if err := rig.RunSetupHooks(m.rig.Path, clonePath); err != nil {
 		style.PrintWarning("could not run setup hooks: %v", err)
 	}
@@ -976,6 +978,12 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		// Non-fatal - log warning but continue
 		style.PrintWarning("could not install runtime settings: %v", err)
 	}
+
+	// Symlink shared settings.json into worktree's .claude/ so Claude Code finds
+	// hooks even when the repo has its own .claude/ directory (gt-4tk). The --settings
+	// flag should handle this, but Claude Code may prioritize the local .claude/settings.json
+	// when a local .claude/ directory exists.
+	ensureWorktreeSettings(clonePath, polecatSettingsDir)
 
 	// Run setup hooks from .runtime/setup-hooks/.
 	// These hooks can inject local git config, copy secrets, or perform other setup tasks.
@@ -2419,4 +2427,31 @@ func assessStaleness(info *StalenessInfo, threshold int) (bool, string) {
 	// No session but has agent bead without special state = clean up
 	// (The session is the source of truth for liveness)
 	return true, "no active session"
+}
+
+// ensureWorktreeSettings symlinks the shared settings.json into the worktree's
+// .claude/ directory. The --settings flag should handle this, but when a repo has
+// its own .claude/ directory, Claude Code may look there first and miss the shared
+// settings (gt-4tk). This is a belt-and-suspenders defense.
+func ensureWorktreeSettings(worktreePath, sharedSettingsDir string) {
+	sharedSettings := filepath.Join(sharedSettingsDir, ".claude", "settings.json")
+	if _, err := os.Stat(sharedSettings); err != nil {
+		return // No shared settings to link
+	}
+
+	localClaudeDir := filepath.Join(worktreePath, ".claude")
+	localSettings := filepath.Join(localClaudeDir, "settings.json")
+
+	// If settings.json already exists locally, don't overwrite
+	if _, err := os.Stat(localSettings); err == nil {
+		return
+	}
+
+	// Ensure .claude/ directory exists
+	_ = os.MkdirAll(localClaudeDir, 0755)
+
+	// Symlink to the shared settings
+	if err := os.Symlink(sharedSettings, localSettings); err != nil {
+		style.PrintWarning("could not symlink settings.json to worktree: %v", err)
+	}
 }

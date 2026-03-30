@@ -3,6 +3,7 @@ package quota
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -209,18 +210,39 @@ func (s *Scanner) resolveAccountHandle(session string) string {
 
 	configDir, err := s.tmux.GetEnvironment(session, "CLAUDE_CONFIG_DIR")
 	if err != nil {
-		return "" // No CLAUDE_CONFIG_DIR = using default config
+		// No CLAUDE_CONFIG_DIR — session uses the default ~/.claude.
+		// Fall back so we can resolve the symlink against registered accounts.
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			configDir = home + "/.claude"
+		} else {
+			return ""
+		}
+	} else {
+		configDir = strings.TrimSpace(configDir)
 	}
 
-	configDir = strings.TrimSpace(configDir)
+	// Resolve symlinks so ~/.claude → ~/.claude-accounts/personal matches
+	// an account whose ConfigDir is ~/.claude-accounts/personal.
+	canonical, err := filepath.EvalSymlinks(configDir)
+	if err != nil {
+		canonical = configDir
+	}
+
 	for handle, acct := range s.accounts.Accounts {
-		// Compare normalized paths (accounts may use ~/... while tmux has expanded)
-		if acct.ConfigDir == configDir || util.ExpandHome(acct.ConfigDir) == configDir {
+		expanded := util.ExpandHome(acct.ConfigDir)
+		if expanded == configDir || expanded == canonical {
 			return handle
+		}
+		// Also resolve account's config dir symlinks for complete comparison
+		if acctCanonical, err := filepath.EvalSymlinks(expanded); err == nil {
+			if acctCanonical == canonical {
+				return handle
+			}
 		}
 	}
 
-	return "" // CLAUDE_CONFIG_DIR doesn't match any registered account
+	return "" // config dir doesn't match any registered account
 }
 
 // isGasTownSession returns true if the session name belongs to Gas Town.

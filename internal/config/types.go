@@ -670,6 +670,43 @@ type RigSettings struct {
 	// Takes precedence over RoleAgents["crew"] but is overridden by explicit --agent flags.
 	// Example: {"denali": "codex", "glacier": "gemini"}
 	WorkerAgents map[string]string `json:"worker_agents,omitempty"`
+
+	// DefaultAccount is the default Claude Code account handle for agents in this rig.
+	// When set, agents spawned without an explicit --account flag will use this account,
+	// giving each session its own CLAUDE_CONFIG_DIR and isolated keychain entry.
+	// Can be overridden per-role via RoleAccounts or per-worker via WorkerAccounts.
+	DefaultAccount string `json:"default_account,omitempty"`
+
+	// RoleAccounts maps role names to account handles for per-role account assignment.
+	// Keys are role names: "witness", "refinery", "polecat", "crew", "mayor".
+	// Overrides DefaultAccount for the specified role.
+	// Example: {"polecat": "qconcierge", "crew": "personal"}
+	RoleAccounts map[string]string `json:"role_accounts,omitempty"`
+
+	// WorkerAccounts maps individual crew worker names to account handles.
+	// Allows per-worker account assignment, overriding RoleAccounts["crew"].
+	// Takes precedence over RoleAccounts but is overridden by explicit --account flags.
+	// Example: {"krieger": "qconcierge", "woodhouse": "personal"}
+	WorkerAccounts map[string]string `json:"worker_accounts,omitempty"`
+}
+
+// ResolveAccount returns the account handle for a given role and optional worker name.
+// Resolution priority: WorkerAccounts[worker] > RoleAccounts[role] > DefaultAccount > "".
+func (rs *RigSettings) ResolveAccount(role, worker string) string {
+	if rs == nil {
+		return ""
+	}
+	if worker != "" && rs.WorkerAccounts != nil {
+		if acct, ok := rs.WorkerAccounts[worker]; ok {
+			return acct
+		}
+	}
+	if role != "" && rs.RoleAccounts != nil {
+		if acct, ok := rs.RoleAccounts[role]; ok {
+			return acct
+		}
+	}
+	return rs.DefaultAccount
 }
 
 // CrewConfig represents crew workspace settings for a rig.

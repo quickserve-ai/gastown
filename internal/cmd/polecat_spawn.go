@@ -342,9 +342,16 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 		return "", fmt.Errorf("rig '%s' not found", s.RigName)
 	}
 
-	// Resolve account
+	// Resolve account: CLI --account > rig RoleAccounts["polecat"] > rig DefaultAccount > town default
+	account := s.account
+	if account == "" {
+		rigSettingsPath := filepath.Join(r.Path, "settings", "config.json")
+		if rigSettings, loadErr := config.LoadRigSettings(rigSettingsPath); loadErr == nil {
+			account = rigSettings.ResolveAccount("polecat", "")
+		}
+	}
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, _, err := config.ResolveAccountConfigDir(accountsPath, s.account)
+	claudeConfigDir, _, err := config.ResolveAccountConfigDir(accountsPath, account)
 	if err != nil {
 		return "", fmt.Errorf("resolving account: %w", err)
 	}

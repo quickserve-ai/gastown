@@ -417,6 +417,23 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating scanner: %w", err)
 	}
 
+	// Auto-detect --from when --session is given alone: scan the target session,
+	// find its current account, and use that as the source for rotation planning.
+	if rotateSession != "" && rotateFrom == "" {
+		results, scanErr := scanner.ScanAll()
+		if scanErr == nil {
+			for _, r := range results {
+				if r.Session == rotateSession && r.AccountHandle != "" {
+					rotateFrom = r.AccountHandle
+					break
+				}
+			}
+		}
+		if rotateFrom == "" {
+			return fmt.Errorf("session %q not found or has no account (start it with --account first)", rotateSession)
+		}
+	}
+
 	mgr := quota.NewManager(townRoot)
 	plan, err := quota.PlanRotation(scanner, mgr, acctCfg, quota.PlanOpts{FromAccount: rotateFrom})
 	if err != nil {

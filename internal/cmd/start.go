@@ -307,7 +307,7 @@ func startCoreAgents(townRoot string, agentOverride string, mu *sync.Mutex) erro
 	go func() {
 		defer wg.Done()
 		mayorMgr := mayor.NewManager(townRoot)
-		if err := mayorMgr.Start(agentOverride); err != nil {
+		if err := mayorMgr.Start(agentOverride, ""); err != nil {
 			if errors.Is(err, mayor.ErrAlreadyRunning) {
 				mu.Lock()
 				fmt.Printf("  %s Mayor already running\n", style.Dim.Render("○"))

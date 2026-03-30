@@ -262,7 +262,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	go func() {
 		defer startupWg.Done()
 		mayorMgr := mayor.NewManager(townRoot)
-		if err := mayorMgr.Start(""); err != nil {
+		if err := mayorMgr.Start("", ""); err != nil {
 			if errors.Is(err, mayor.ErrAlreadyRunning) {
 				mayorResult = agentStartResult{name: "Mayor", ok: true, detail: mayorMgr.SessionName()}
 			} else if errors.Is(err, mayor.ErrACPActive) {

@@ -1566,7 +1566,7 @@ func (d *Daemon) ensureRefineryRunning(rigName string) {
 func (d *Daemon) ensureMayorRunning() {
 	mgr := mayor.NewManager(d.config.TownRoot)
 
-	if err := mgr.Start(""); err != nil {
+	if err := mgr.Start("", ""); err != nil {
 		if err == mayor.ErrAlreadyRunning {
 			// Session exists — verify agent is actually alive.
 			// During handoffs the agent is briefly undetectable, so we
@@ -1581,7 +1581,7 @@ func (d *Daemon) ensureMayorRunning() {
 						return
 					}
 					d.mayorZombieCount = 0
-					if startErr := mgr.Start(""); startErr != nil {
+					if startErr := mgr.Start("", ""); startErr != nil {
 						d.logger.Printf("Error restarting Mayor after zombie cleanup: %v", startErr)
 						return
 					}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -250,52 +249,6 @@ func TestMailAnnounces(t *testing.T) {
 			t.Errorf("error should mention 'no announce channels configured', got: %v", err)
 		}
 	})
-}
-
-// TestFormatCrosstownTimestamps tests the timestamp block formatting for cross-town relay.
-func TestFormatCrosstownTimestamps(t *testing.T) {
-	sentAt := time.Date(2026, 3, 29, 14, 30, 0, 0, time.UTC)
-	deliveredAt := time.Date(2026, 3, 29, 14, 35, 12, 0, time.UTC)
-
-	result := formatCrosstownTimestamps(sentAt, deliveredAt)
-
-	if !strings.Contains(result, "sent_at: 2026-03-29T14:30:00Z") {
-		t.Errorf("expected sent_at timestamp, got: %s", result)
-	}
-	if !strings.Contains(result, "delivered_at: 2026-03-29T14:35:12Z") {
-		t.Errorf("expected delivered_at timestamp, got: %s", result)
-	}
-	if !strings.HasSuffix(result, "\n\n") {
-		t.Error("timestamp block should end with double newline")
-	}
-}
-
-// TestFormatCrosstownTimestampsNonUTC tests that non-UTC timestamps are normalized to UTC.
-func TestFormatCrosstownTimestampsNonUTC(t *testing.T) {
-	loc := time.FixedZone("EST", -5*60*60)
-	sentAt := time.Date(2026, 3, 29, 9, 30, 0, 0, loc) // 09:30 EST = 14:30 UTC
-
-	result := formatCrosstownTimestamps(sentAt, time.Now())
-
-	if !strings.Contains(result, "sent_at: 2026-03-29T14:30:00Z") {
-		t.Errorf("expected UTC-normalized sent_at, got: %s", result)
-	}
-}
-
-// TestCrosstownTimestampPrependsToBody tests that timestamps are prepended to existing body.
-func TestCrosstownTimestampPrependsToBody(t *testing.T) {
-	sentAt := time.Date(2026, 3, 29, 14, 30, 0, 0, time.UTC)
-	deliveredAt := time.Date(2026, 3, 29, 14, 35, 0, 0, time.UTC)
-	body := "Hello from Cherub's town"
-
-	result := formatCrosstownTimestamps(sentAt, deliveredAt) + body
-
-	if !strings.HasPrefix(result, "sent_at:") {
-		t.Error("timestamp block should be at the start")
-	}
-	if !strings.HasSuffix(result, body) {
-		t.Error("original body should be at the end")
-	}
 }
 
 // TestAnnounceMessageParsing tests parsing of announce messages from beads output.

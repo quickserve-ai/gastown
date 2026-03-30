@@ -41,6 +41,7 @@ Role shortcuts: "mayor" in mail/nudge addresses resolves to this agent.`,
 
 var (
 	mayorAgentOverride string
+	mayorAccount       string
 	mayorStatusRunning bool
 )
 
@@ -126,8 +127,11 @@ func init() {
 	mayorStatusCmd.Flags().BoolVar(&mayorStatusRunning, "running", false, "Output only true/false for running status")
 
 	mayorStartCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
+	mayorStartCmd.Flags().StringVar(&mayorAccount, "account", "", "Claude Code account handle to use (overrides rig/town default)")
 	mayorAttachCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
+	mayorAttachCmd.Flags().StringVar(&mayorAccount, "account", "", "Claude Code account handle to use (overrides rig/town default)")
 	mayorRestartCmd.Flags().StringVar(&mayorAgentOverride, "agent", "", "Agent alias to run the Mayor with (overrides town default)")
+	mayorRestartCmd.Flags().StringVar(&mayorAccount, "account", "", "Claude Code account handle to use (overrides rig/town default)")
 
 	mayorAcpCmd.Flags().StringVar(&acpRigOverride, "rig", "", "Rig name (overrides GT_RIG env)")
 	mayorAcpCmd.Flags().StringVar(&acpTownRootOverride, "town", "", "Town root directory (overrides GT_TOWN_ROOT env)")
@@ -156,8 +160,16 @@ func runMayorStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Resolve account: --account flag > town default
+	townRoot, _ := workspace.FindFromCwdOrError()
+	var claudeConfigDir string
+	if townRoot != "" {
+		accountsPath := constants.MayorAccountsPath(townRoot)
+		claudeConfigDir, _, _ = config.ResolveAccountConfigDir(accountsPath, mayorAccount)
+	}
+
 	fmt.Println("Starting Mayor session...")
-	if err := mgr.Start(mayorAgentOverride); err != nil {
+	if err := mgr.Start(mayorAgentOverride, claudeConfigDir); err != nil {
 		if err == mayor.ErrAlreadyRunning {
 			return fmt.Errorf("Mayor session already running. Attach with: gt mayor attach")
 		}
@@ -224,7 +236,9 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 	if !running {
 		// Auto-start if not running
 		fmt.Println("Mayor session not running, starting...")
-		if err := mgr.Start(mayorAgentOverride); err != nil {
+		accountsPath := constants.MayorAccountsPath(townRoot)
+		claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, mayorAccount)
+		if err := mgr.Start(mayorAgentOverride, claudeConfigDir); err != nil {
 			return err
 		}
 	} else {

@@ -113,7 +113,8 @@ func (m *Manager) mayorDir() string {
 // Start starts the mayor session.
 // It checks both TMUX and ACP modes and returns ErrAlreadyRunning if active.
 // agentOverride optionally specifies a different agent alias to use.
-func (m *Manager) Start(agentOverride string) error {
+// claudeConfigDir optionally specifies a CLAUDE_CONFIG_DIR for account isolation.
+func (m *Manager) Start(agentOverride, claudeConfigDir string) error {
 	status, err := m.CombinedStatus()
 	if err == nil && status.Active {
 		switch status.Mode {
@@ -123,12 +124,13 @@ func (m *Manager) Start(agentOverride string) error {
 			return ErrAlreadyRunning
 		}
 	}
-	return m.StartTMUX(agentOverride)
+	return m.StartTMUX(agentOverride, claudeConfigDir)
 }
 
 // StartTMUX starts the mayor session in TMUX mode.
 // agentOverride optionally specifies a different agent alias to use.
-func (m *Manager) StartTMUX(agentOverride string) error {
+// claudeConfigDir optionally specifies a CLAUDE_CONFIG_DIR for account isolation.
+func (m *Manager) StartTMUX(agentOverride, claudeConfigDir string) error {
 	if IsACPActive(m.townRoot) {
 		return ErrAlreadyRunning
 	}

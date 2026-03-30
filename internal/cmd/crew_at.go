@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -97,13 +98,21 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Resolve account for runtime config
+	// Resolve account for runtime config:
+	// CLI --account > rig WorkerAccounts[name] > rig RoleAccounts["crew"] > rig DefaultAccount > town default
 	townRoot, err := workspace.FindFromCwd()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, accountHandle, err := config.ResolveAccountConfigDir(accountsPath, crewAccount)
+	account := crewAccount
+	if account == "" {
+		rigSettingsPath := filepath.Join(r.Path, "settings", "config.json")
+		if rigSettings, loadErr := config.LoadRigSettings(rigSettingsPath); loadErr == nil {
+			account = rigSettings.ResolveAccount("crew", name)
+		}
+	}
+	claudeConfigDir, accountHandle, err := config.ResolveAccountConfigDir(accountsPath, account)
 	if err != nil {
 		return fmt.Errorf("resolving account: %w", err)
 	}

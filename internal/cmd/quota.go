@@ -351,9 +351,10 @@ func printScanText(results []quota.ScanResult) error {
 
 // Rotate command flags
 var (
-	rotateDryRun bool
-	rotateFrom   string
-	rotateIdle   bool
+	rotateDryRun    bool
+	rotateFrom      string
+	rotateIdle      bool
+	rotateSession   string
 )
 
 var quotaRotateCmd = &cobra.Command{
@@ -376,11 +377,12 @@ The rotation process:
   5. Sends /resume to recover conversation context
 
 Examples:
-  gt quota rotate                    # Rotate all blocked sessions
-  gt quota rotate --from work        # Preemptively rotate sessions on 'work' account
-  gt quota rotate --from work --idle # Only rotate idle sessions on 'work' account
-  gt quota rotate --dry-run          # Show plan without executing
-  gt quota rotate --json             # JSON output`,
+  gt quota rotate                                          # Rotate all blocked sessions
+  gt quota rotate --from work                              # Preemptively rotate sessions on 'work' account
+  gt quota rotate --from work --idle                       # Only rotate idle sessions on 'work' account
+  gt quota rotate --from work --session qc-crew-krieger    # Rotate a specific session
+  gt quota rotate --dry-run                                # Show plan without executing
+  gt quota rotate --json                                   # JSON output`,
 	RunE: runQuotaRotate,
 }
 
@@ -426,6 +428,29 @@ func runQuotaRotate(cmd *cobra.Command, args []string) error {
 	// pane) would poison the available account pool, blocking rotation of
 	// sessions that actually need it. Account state is updated only after
 	// successful rotation execution (LastUsed in executeKeychainRotation).
+
+	// Filter to a single session when --session is specified.
+	if rotateSession != "" {
+		if _, ok := plan.Assignments[rotateSession]; !ok {
+			if quotaJSON {
+				return json.NewEncoder(os.Stdout).Encode([]quota.RotateResult{})
+			}
+			return fmt.Errorf("session %q not found in rotation plan (is it running? does --from match its account?)", rotateSession)
+		}
+		// Keep only the targeted session
+		for session := range plan.Assignments {
+			if session != rotateSession {
+				delete(plan.Assignments, session)
+			}
+		}
+		filtered := make([]quota.ScanResult, 0, 1)
+		for _, r := range plan.LimitedSessions {
+			if r.Session == rotateSession {
+				filtered = append(filtered, r)
+			}
+		}
+		plan.LimitedSessions = filtered
+	}
 
 	if len(plan.LimitedSessions) == 0 {
 		if quotaJSON {
@@ -967,6 +992,7 @@ func init() {
 	quotaRotateCmd.Flags().BoolVar(&quotaJSON, "json", false, "Output as JSON")
 	quotaRotateCmd.Flags().StringVar(&rotateFrom, "from", "", "Preemptively rotate sessions using this account")
 	quotaRotateCmd.Flags().BoolVar(&rotateIdle, "idle", false, "Only rotate sessions at the idle prompt (skip busy agents)")
+	quotaRotateCmd.Flags().StringVar(&rotateSession, "session", "", "Target a specific tmux session (e.g., qc-crew-krieger)")
 
 	quotaWatchCmd.Flags().DurationVar(&watchInterval, "interval", 5*time.Minute, "Poll interval")
 	quotaWatchCmd.Flags().BoolVar(&watchDryRun, "dry-run", false, "Show detections without executing rotation")

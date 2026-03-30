@@ -307,13 +307,16 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Resolve account config once for all crew members
+	// Resolve account config — per-worker if rig settings specify, otherwise shared
 	townRoot, _ := workspace.Find(r.Path)
 	if townRoot == "" {
 		townRoot = filepath.Dir(r.Path)
 	}
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, crewAccount)
+
+	// Load rig settings for per-worker account resolution
+	rigSettingsPath := filepath.Join(r.Path, "settings", "config.json")
+	rigSettings, _ := config.LoadRigSettings(rigSettingsPath)
 
 	// Validate: --resume with a specific session ID only makes sense for a single
 	// crew member. Resuming N members with the same session ID is always a mistake.
@@ -341,15 +344,6 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: --resume will auto-resume the most recent session for all %d crew members\n", len(crewNames))
 	}
 
-	// Build start options (shared across all crew members)
-	opts := crew.StartOptions{
-		Account:         crewAccount,
-		ClaudeConfigDir: claudeConfigDir,
-		AgentOverride:   crewAgentOverride,
-		ResumeSessionID: crewResume,
-		KillExisting:    crewResume != "", // Resume needs to kill existing session first
-	}
-
 	// Start each crew member in parallel
 	type result struct {
 		name    string
@@ -365,6 +359,23 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 		wg.Add(1)
 		go func(crewName string) {
 			defer wg.Done()
+
+			// Resolve account for this specific worker:
+			// CLI --account flag > rig WorkerAccounts[name] > rig RoleAccounts["crew"] > rig DefaultAccount > town default
+			account := crewAccount
+			if account == "" && rigSettings != nil {
+				account = rigSettings.ResolveAccount("crew", crewName)
+			}
+			claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, account)
+
+			opts := crew.StartOptions{
+				Account:         account,
+				ClaudeConfigDir: claudeConfigDir,
+				AgentOverride:   crewAgentOverride,
+				ResumeSessionID: crewResume,
+				KillExisting:    crewResume != "", // Resume needs to kill existing session first
+			}
+
 			err := crewMgr.Start(crewName, opts)
 			skipped := errors.Is(err, crew.ErrSessionRunning)
 			if skipped {

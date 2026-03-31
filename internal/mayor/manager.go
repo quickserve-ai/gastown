@@ -151,10 +151,12 @@ func (m *Manager) StartTMUX(agentOverride, claudeConfigDir string) error {
 		return fmt.Errorf("creating mayor directory: %w", err)
 	}
 
-	// Resolve CLAUDE_CONFIG_DIR from accounts.json so the mayor session
-	// uses the correct account. Same pattern as crew startup (start.go).
-	accountsPath := constants.MayorAccountsPath(m.townRoot)
-	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
+	// Resolve CLAUDE_CONFIG_DIR: explicit --account flag wins, then
+	// accounts.json lookup, then environment variable fallback.
+	if claudeConfigDir == "" {
+		accountsPath := constants.MayorAccountsPath(m.townRoot)
+		claudeConfigDir, _, _ = config.ResolveAccountConfigDir(accountsPath, "")
+	}
 	if claudeConfigDir == "" {
 		claudeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
 	}

@@ -398,9 +398,14 @@ func isInfNaNError(err error) bool {
 		return false
 	}
 	msg := err.Error()
+	// Dolt wraps values in single quotes: "'+Inf' is not a valid value for 'double'"
+	// Match both quoted and unquoted forms.
 	return strings.Contains(msg, "+Inf is not a valid value") ||
+		strings.Contains(msg, "'+Inf' is not a valid value") ||
 		strings.Contains(msg, "-Inf is not a valid value") ||
-		strings.Contains(msg, "NaN is not a valid value")
+		strings.Contains(msg, "'-Inf' is not a valid value") ||
+		strings.Contains(msg, "NaN is not a valid value") ||
+		strings.Contains(msg, "'NaN' is not a valid value")
 }
 
 func isCloseEvent(e *beadsdk.Event) bool {

@@ -1541,7 +1541,11 @@ func runDoltSync(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    %s\n", style.Dim.Render(r.Remote))
 			pushed++ // count as would-push for summary
 		case r.Skipped:
-			fmt.Printf("  %s %s — no remote configured\n", style.Dim.Render("○"), r.Database)
+			reason := r.SkipReason
+			if reason == "" {
+				reason = "no remote configured"
+			}
+			fmt.Printf("  %s %s — %s\n", style.Dim.Render("○"), r.Database, reason)
 			skipped++
 		case r.Error != nil:
 			fmt.Printf("  %s %s → origin main\n", style.Bold.Render("✗"), r.Database)
@@ -1618,7 +1622,11 @@ func runDoltPull(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s %s ← %s (dry run)\n", style.Bold.Render("~"), r.Database, r.Remote)
 			pulled++
 		case r.Skipped:
-			fmt.Printf("  %s %s — no remote configured\n", style.Dim.Render("○"), r.Database)
+			reason := r.SkipReason
+			if reason == "" {
+				reason = "no remote configured"
+			}
+			fmt.Printf("  %s %s — %s\n", style.Dim.Render("○"), r.Database, reason)
 			skipped++
 		case r.Error != nil:
 			fmt.Printf("  %s %s ← remote\n", style.Bold.Render("✗"), r.Database)

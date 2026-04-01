@@ -37,6 +37,9 @@ type SyncResult struct {
 	// Skipped is true if the database was skipped (e.g., no remote configured).
 	Skipped bool
 
+	// SkipReason describes why the database was skipped (e.g., "no-sync marker", "no remote configured").
+	SkipReason string
+
 	// DryRun is true if this was a dry-run (no actual push).
 	DryRun bool
 
@@ -215,6 +218,7 @@ func PullDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 		if opts.Filter == "" {
 			if _, err := os.Stat(filepath.Join(dbDir, ".no-sync")); err == nil {
 				result.Skipped = true
+				result.SkipReason = ".no-sync marker"
 				results = append(results, result)
 				continue
 			}
@@ -231,6 +235,7 @@ func PullDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 
 		if remoteURL == "" {
 			result.Skipped = true
+			result.SkipReason = "no remote configured"
 			results = append(results, result)
 			continue
 		}
@@ -281,6 +286,7 @@ func PullDatabases(townRoot string, opts SyncOptions) []SyncResult {
 		if opts.Filter == "" {
 			if _, err := os.Stat(filepath.Join(dbDir, ".no-sync")); err == nil {
 				result.Skipped = true
+				result.SkipReason = ".no-sync marker"
 				results = append(results, result)
 				continue
 			}
@@ -297,6 +303,7 @@ func PullDatabases(townRoot string, opts SyncOptions) []SyncResult {
 
 		if remoteURL == "" {
 			result.Skipped = true
+			result.SkipReason = "no remote configured"
 			results = append(results, result)
 			continue
 		}
@@ -358,9 +365,9 @@ func PushDatabaseSQL(townRoot, db, remote string, force bool) error {
 		pushQuery = fmt.Sprintf("USE `%s`; CALL DOLT_PUSH('--force', '%s', 'main')", db, remote)
 	}
 
-	// Push can be slow for large databases — use a longer timeout
+	// Push can be slow for large databases or initial syncs — use a generous timeout
 	config := DefaultConfig(townRoot)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	cmd := buildDoltSQLCmd(ctx, config, "-q", pushQuery)
@@ -428,6 +435,7 @@ func SyncDatabases(townRoot string, opts SyncOptions) []SyncResult {
 		if opts.Filter == "" {
 			if _, err := os.Stat(filepath.Join(dbDir, ".no-sync")); err == nil {
 				result.Skipped = true
+				result.SkipReason = ".no-sync marker"
 				results = append(results, result)
 				continue
 			}
@@ -463,6 +471,7 @@ func SyncDatabases(townRoot string, opts SyncOptions) []SyncResult {
 				result.Remote = remoteURL
 			} else {
 				result.Skipped = true
+				result.SkipReason = "no remote configured"
 				results = append(results, result)
 				continue
 			}
@@ -522,6 +531,7 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 		if opts.Filter == "" {
 			if _, err := os.Stat(filepath.Join(dbDir, ".no-sync")); err == nil {
 				result.Skipped = true
+				result.SkipReason = ".no-sync marker"
 				results = append(results, result)
 				continue
 			}
@@ -555,6 +565,7 @@ func SyncDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 				result.Remote = remoteURL
 			} else {
 				result.Skipped = true
+				result.SkipReason = "no remote configured"
 				results = append(results, result)
 				continue
 			}

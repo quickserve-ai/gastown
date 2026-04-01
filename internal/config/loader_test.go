@@ -401,6 +401,173 @@ func TestRigSettingsValidation(t *testing.T) {
 	}
 }
 
+func TestRigSettingsResolveAccount(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil receiver returns empty", func(t *testing.T) {
+		var rs *RigSettings
+		if got := rs.ResolveAccount("crew", "woodhouse"); got != "" {
+			t.Errorf("ResolveAccount on nil = %q, want empty", got)
+		}
+	})
+
+	t.Run("returns DefaultAccount when no role or worker match", func(t *testing.T) {
+		rs := &RigSettings{DefaultAccount: "personal"}
+		if got := rs.ResolveAccount("crew", "woodhouse"); got != "personal" {
+			t.Errorf("ResolveAccount = %q, want %q", got, "personal")
+		}
+	})
+
+	t.Run("RoleAccounts overrides DefaultAccount", func(t *testing.T) {
+		rs := &RigSettings{
+			DefaultAccount: "personal",
+			RoleAccounts:   map[string]string{"crew": "qconcierge"},
+		}
+		if got := rs.ResolveAccount("crew", ""); got != "qconcierge" {
+			t.Errorf("ResolveAccount = %q, want %q", got, "qconcierge")
+		}
+	})
+
+	t.Run("WorkerAccounts overrides RoleAccounts", func(t *testing.T) {
+		rs := &RigSettings{
+			DefaultAccount: "personal",
+			RoleAccounts:   map[string]string{"crew": "qconcierge"},
+			WorkerAccounts: map[string]string{"krieger": "special"},
+		}
+		if got := rs.ResolveAccount("crew", "krieger"); got != "special" {
+			t.Errorf("ResolveAccount = %q, want %q", got, "special")
+		}
+	})
+
+	t.Run("unmatched worker falls through to RoleAccounts", func(t *testing.T) {
+		rs := &RigSettings{
+			DefaultAccount: "personal",
+			RoleAccounts:   map[string]string{"crew": "qconcierge"},
+			WorkerAccounts: map[string]string{"krieger": "special"},
+		}
+		if got := rs.ResolveAccount("crew", "woodhouse"); got != "qconcierge" {
+			t.Errorf("ResolveAccount = %q, want %q", got, "qconcierge")
+		}
+	})
+
+	t.Run("unmatched role falls through to DefaultAccount", func(t *testing.T) {
+		rs := &RigSettings{
+			DefaultAccount: "personal",
+			RoleAccounts:   map[string]string{"polecat": "qconcierge"},
+		}
+		if got := rs.ResolveAccount("crew", ""); got != "personal" {
+			t.Errorf("ResolveAccount = %q, want %q", got, "personal")
+		}
+	})
+
+	t.Run("empty everything returns empty", func(t *testing.T) {
+		rs := &RigSettings{}
+		if got := rs.ResolveAccount("crew", "woodhouse"); got != "" {
+			t.Errorf("ResolveAccount = %q, want empty", got)
+		}
+	})
+}
+
+func TestRigSettingsAccountFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings", "config.json")
+
+	original := &RigSettings{
+		Type:           "rig-settings",
+		Version:        1,
+		DefaultAccount: "personal",
+		RoleAccounts: map[string]string{
+			"polecat": "qconcierge",
+			"crew":    "qconcierge",
+		},
+		WorkerAccounts: map[string]string{
+			"krieger": "special",
+		},
+	}
+
+	if err := SaveRigSettings(path, original); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	loaded, err := LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("LoadRigSettings: %v", err)
+	}
+
+	if loaded.DefaultAccount != "personal" {
+		t.Errorf("DefaultAccount = %q, want %q", loaded.DefaultAccount, "personal")
+	}
+	if len(loaded.RoleAccounts) != 2 {
+		t.Fatalf("RoleAccounts length = %d, want 2", len(loaded.RoleAccounts))
+	}
+	if loaded.RoleAccounts["polecat"] != "qconcierge" {
+		t.Errorf("RoleAccounts[polecat] = %q, want %q", loaded.RoleAccounts["polecat"], "qconcierge")
+	}
+	if loaded.RoleAccounts["crew"] != "qconcierge" {
+		t.Errorf("RoleAccounts[crew] = %q, want %q", loaded.RoleAccounts["crew"], "qconcierge")
+	}
+	if len(loaded.WorkerAccounts) != 1 {
+		t.Fatalf("WorkerAccounts length = %d, want 1", len(loaded.WorkerAccounts))
+	}
+	if loaded.WorkerAccounts["krieger"] != "special" {
+		t.Errorf("WorkerAccounts[krieger] = %q, want %q", loaded.WorkerAccounts["krieger"], "special")
+	}
+
+	// Verify ResolveAccount works on loaded settings
+	if got := loaded.ResolveAccount("polecat", ""); got != "qconcierge" {
+		t.Errorf("loaded.ResolveAccount(polecat) = %q, want %q", got, "qconcierge")
+	}
+	if got := loaded.ResolveAccount("crew", "krieger"); got != "special" {
+		t.Errorf("loaded.ResolveAccount(crew, krieger) = %q, want %q", got, "special")
+	}
+	if got := loaded.ResolveAccount("crew", "woodhouse"); got != "qconcierge" {
+		t.Errorf("loaded.ResolveAccount(crew, woodhouse) = %q, want %q", got, "qconcierge")
+	}
+	if got := loaded.ResolveAccount("mayor", ""); got != "personal" {
+		t.Errorf("loaded.ResolveAccount(mayor) = %q, want %q", got, "personal")
+	}
+}
+
+func TestRigSettingsAccountFieldsFromJSON(t *testing.T) {
+	t.Parallel()
+	// Verify that real-world JSON config shape (like qcore's) loads correctly.
+	jsonData := `{
+		"type": "rig-settings",
+		"version": 1,
+		"default_account": "personal",
+		"role_accounts": {
+			"polecat": "qconcierge",
+			"crew": "qconcierge"
+		}
+	}`
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(jsonData), 0644); err != nil {
+		t.Fatalf("writing test config: %v", err)
+	}
+
+	loaded, err := LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("LoadRigSettings: %v", err)
+	}
+
+	if loaded.DefaultAccount != "personal" {
+		t.Errorf("DefaultAccount = %q, want %q", loaded.DefaultAccount, "personal")
+	}
+	if loaded.RoleAccounts["polecat"] != "qconcierge" {
+		t.Errorf("RoleAccounts[polecat] = %q, want %q", loaded.RoleAccounts["polecat"], "qconcierge")
+	}
+	if loaded.RoleAccounts["crew"] != "qconcierge" {
+		t.Errorf("RoleAccounts[crew] = %q, want %q", loaded.RoleAccounts["crew"], "qconcierge")
+	}
+	// worker_accounts not in JSON — should be nil
+	if loaded.WorkerAccounts != nil {
+		t.Errorf("WorkerAccounts = %v, want nil", loaded.WorkerAccounts)
+	}
+}
+
 func TestDefaultMergeQueueConfig(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultMergeQueueConfig()

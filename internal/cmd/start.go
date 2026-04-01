@@ -1019,9 +1019,17 @@ func runStartCrew(cmd *cobra.Command, args []string) error {
 	crewGit := git.NewGit(r.Path)
 	crewMgr := crew.NewManager(r, crewGit)
 
-	// Resolve account for Claude config
+	// Resolve account for Claude config:
+	// CLI --account flag > rig WorkerAccounts[name] > rig RoleAccounts["crew"] > rig DefaultAccount > town default
+	account := startCrewAccount
+	if account == "" {
+		rigSettingsPath := filepath.Join(r.Path, "settings", "config.json")
+		if rigSettings, loadErr := config.LoadRigSettings(rigSettingsPath); loadErr == nil {
+			account = rigSettings.ResolveAccount("crew", name)
+		}
+	}
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, accountHandle, err := config.ResolveAccountConfigDir(accountsPath, startCrewAccount)
+	claudeConfigDir, accountHandle, err := config.ResolveAccountConfigDir(accountsPath, account)
 	if err != nil {
 		return fmt.Errorf("resolving account: %w", err)
 	}
@@ -1031,7 +1039,7 @@ func runStartCrew(cmd *cobra.Command, args []string) error {
 
 	// Use manager's Start() method - handles workspace creation, settings, and session
 	err = crewMgr.Start(name, crew.StartOptions{
-		Account:         startCrewAccount,
+		Account:         account,
 		ClaudeConfigDir: claudeConfigDir,
 		AgentOverride:   startCrewAgentOverride,
 	})

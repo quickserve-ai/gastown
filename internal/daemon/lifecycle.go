@@ -561,9 +561,18 @@ func (d *Daemon) getStartCommand(roleConfig *beads.RoleConfig, parsed *ParsedIde
 // Uses centralized AgentEnv for consistency, plus custom env vars from role config if available.
 func (d *Daemon) setSessionEnvironment(sessionName string, roleConfig *beads.RoleConfig, parsed *ParsedIdentity) {
 	// Resolve CLAUDE_CONFIG_DIR from accounts.json so daemon-restarted sessions
-	// use the correct account. Mirrors the crew startup path (start.go).
+	// use the correct account. Checks rig settings for role/worker-specific
+	// account overrides before falling back to town default.
+	account := ""
+	if parsed.RigName != "" {
+		rigPath := filepath.Join(d.config.TownRoot, parsed.RigName)
+		rigSettingsPath := filepath.Join(rigPath, "settings", "config.json")
+		if rigSettings, loadErr := config.LoadRigSettings(rigSettingsPath); loadErr == nil {
+			account = rigSettings.ResolveAccount(parsed.RoleType, parsed.AgentName)
+		}
+	}
 	accountsPath := constants.MayorAccountsPath(d.config.TownRoot)
-	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
+	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, account)
 	if runtimeConfigDir == "" {
 		runtimeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
 	}

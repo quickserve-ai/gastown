@@ -1,0 +1,267 @@
+description = """
+Fix-PR loop: take an existing PR and make it ship-ready.
+
+Given a PR (by number or branch), this formula checks out the branch, then runs
+a tight loop: wait for all automated reviewers (Cursor Bugbot, CodeRabbit,
+Greptile, Delve) to finish, run /fix-pr to address every comment and CI failure,
+and repeat until the PR is clean or max iterations reached.
+
+Use this when:
+- A PR has unaddressed review comments (bot or human)
+- CI is failing on an existing PR
+- A polecat's work landed a PR but didn't address post-push feedback
+- The pr-feedback-patrol found an actionable PR
+
+This is a standalone formula — it does NOT implement features. It only fixes
+what's already on the PR. The implementation is assumed to be done.
+
+**Dispatch note:** When slinging this formula for PRs against main, always use
+`gt sling --no-merge` so that `gt done` creates/updates the PR for human review
+instead of submitting to the merge queue. Branch protection requires approval
+before merge — the refinery cannot auto-merge PRs against main.
+
+## Polecat Contract (Self-Cleaning Model)
+
+You are a self-cleaning worker. You:
+1. Receive work via your hook (formula checklist + issue with PR context)
+2. Work through formula steps in order
+3. Complete and self-clean via `gt done`
+4. You are GONE
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| issue | hook_bead | The tracking issue for this fix-pr work |
+| pr_number | sling vars | The PR number to fix |
+| setup_command | rig config | Setup/install command (e.g., `yarn install`). Empty = skip. |
+
+## Failure Modes
+
+| Situation | Action |
+|-----------|--------|
+| CI fails after fix | Re-run /fix-pr (loop handles this) |
+| Reviewer comments after fix | Wait for completion, re-run /fix-pr (loop handles this) |
+| Max iterations reached | Proceed to submit with remaining items noted |
+| Blocked on external | Mail Witness for help |
+| Context filling | Use gt handoff to cycle to fresh session |"""
+formula = "mol-fix-pr-loop"
+version = 1
+
+[[steps]]
+id = "load-context"
+title = "Load context and check out PR branch"
+description = """
+Initialize your session and get onto the PR's branch.
+
+**1. Prime your environment:**
+```bash
+gt prime
+bd prime
+```
+
+**2. Check your hook and read the issue:**
+```bash
+gt hook
+bd show {{issue}}
+```
+
+The issue description or notes should contain the PR number. If not provided
+via the pr_number variable, detect it:
+```bash
+# If pr_number is set:
+PR_NUMBER={{pr_number}}
+
+# If not, check if already on a PR branch:
+PR_NUMBER=$(gh pr view --json number -q '.number' 2>/dev/null)
+```
+
+**3. Check out the PR branch:**
+```bash
+# Get the branch name
+BRANCH=$(gh pr view $PR_NUMBER --json headRefName -q '.headRefName')
+REPO_URL=$(gh pr view $PR_NUMBER --json headRepository -q '.headRepository.url')
+
+git fetch origin
+git checkout $BRANCH
+git pull origin $BRANCH
+```
+
+**4. Run setup if configured:**
+```bash
+{{setup_command}}
+```
+
+**5. Understand the PR state:**
+```bash
+# What does the PR look like?
+gh pr view $PR_NUMBER --json title,state,reviewDecision,statusCheckRollup
+
+# How many unresolved threads?
+gh api graphql -f query='query { repository(owner:"{owner}", name:"{repo}") {
+  pullRequest(number:'$PR_NUMBER') { reviewThreads(first:100) {
+    nodes { isResolved comments(first:1) { nodes { body path line } } }
+  } }
+}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length'
+```
+
+**Exit criteria:** On the PR branch, dependencies installed, PR state understood."""
+
+[[steps]]
+id = "fix-pr-loop"
+title = "Fix-PR loop: address all comments and CI failures"
+needs = ["load-context"]
+description = """
+Run /fix-pr in a loop, gated on automated reviewer completion.
+
+**The loop:**
+
+```
+ITERATION=0
+MAX_ITERATIONS=5
+
+while ITERATION < MAX_ITERATIONS:
+  1. Wait for automated reviewers to complete
+  2. Record HEAD sha
+  3. Run /fix-pr
+  4. If HEAD changed (new commits pushed) → increment ITERATION, continue
+  5. If HEAD unchanged (no fixes needed) → break
+```
+
+**Step 1: Wait for automated reviewers to complete.**
+
+Gate on GitHub check-run status, not comment count. This handles timing
+variations (Bugbot: ~7 min, CodeRabbit: ~5 min, Delve: ~2 min).
+
+```bash
+PR_NUMBER=$(gh pr view --json number -q '.number')
+
+# Poll until all bot check-runs are complete (max 15 minutes)
+for i in $(seq 1 15); do
+  PENDING=$(gh pr checks $PR_NUMBER --json name,status \
+    --jq '[.[] | select(
+      (.name | test("Bugbot|CodeRabbit|Greptile|Delve"; "i")) and
+      (.status != "COMPLETED")
+    )] | length')
+
+  if [ "$PENDING" = "0" ]; then
+    echo "All automated reviewers complete."
+    break
+  fi
+
+  echo "Waiting for $PENDING reviewer check(s)... (attempt $i/15)"
+  sleep 60
+done
+```
+
+If checks haven't completed after 15 minutes, proceed anyway — some reviewers
+may not have triggered for this PR.
+
+**Step 2: Record HEAD before fix-pr.**
+
+```bash
+HEAD_BEFORE=$(git rev-parse HEAD)
+```
+
+**Step 3: Run /fix-pr.**
+
+```
+/fix-pr
+```
+
+This will:
+- Fetch ALL review comments (Bugbot, CodeRabbit, Greptile, Delve, humans)
+- Classify by root-cause error class
+- Sweep the entire changeset for unreported instances
+- Fix valid issues, reply to every comment
+- Push fixes
+
+**Step 4: Check if /fix-pr pushed new commits.**
+
+```bash
+HEAD_AFTER=$(git rev-parse HEAD)
+
+if [ "$HEAD_BEFORE" != "$HEAD_AFTER" ]; then
+  echo "fix-pr pushed new commits — looping back to wait for reviewers."
+  ITERATION=$((ITERATION + 1))
+  if [ "$ITERATION" -ge 5 ]; then
+    echo "WARNING: 5 fix-pr iterations reached. Proceeding to submit."
+    echo "Remaining comments may need human review."
+    break
+  fi
+  # Continue loop — go back to Step 1
+else
+  echo "fix-pr made no changes — PR is clean."
+  break
+fi
+```
+
+**Between iterations:** If /fix-pr reports items it couldn't fix (needs human
+input, blocked on infrastructure, etc.), note them but continue the loop for
+items it CAN fix.
+
+**Exit criteria:** Either (a) /fix-pr made no changes (PR is clean), or
+(b) 5 iterations reached with remaining items noted."""
+
+[[steps]]
+id = "verify-and-report"
+title = "Verify PR state and report"
+needs = ["fix-pr-loop"]
+description = """
+Final verification and reporting.
+
+**1. Check final PR state:**
+```bash
+PR_NUMBER=$(gh pr view --json number -q '.number')
+
+# CI status
+gh pr checks $PR_NUMBER
+
+# Unresolved threads
+UNRESOLVED=$(gh api graphql -f query='query { repository(owner:"{owner}", name:"{repo}") {
+  pullRequest(number:'$PR_NUMBER') { reviewThreads(first:100) {
+    nodes { isResolved }
+  } }
+}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+echo "Unresolved threads: $UNRESOLVED"
+```
+
+**2. Update the tracking bead:**
+```bash
+bd update {{issue}} --notes "Fix-PR loop complete.
+Iterations: <N>
+Unresolved threads: <count>
+CI status: <pass/fail>
+Summary: <what was fixed>"
+```
+
+**3. If PR is fully clean (0 unresolved, CI green):**
+```bash
+# Update bead and exit
+bd update {{issue}} --notes "PR is ship-ready. All comments addressed, CI green."
+gt done
+```
+
+**4. If PR still has issues after max iterations:**
+Note remaining items in the bead and PR description for human review:
+```bash
+bd update {{issue}} --notes "Fix-PR loop reached max iterations.
+Remaining: <list of unresolved items that need human judgment>"
+gt done
+```
+
+**Exit criteria:** PR state reported, bead updated, polecat exits."""
+
+[vars]
+[vars.issue]
+description = "The tracking issue for this fix-pr work"
+required = true
+
+[vars.pr_number]
+description = "The PR number to fix (auto-detected from branch if not provided)"
+default = ""
+
+[vars.setup_command]
+description = "Setup/install command (e.g., yarn install). Empty = skip."
+default = ""

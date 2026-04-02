@@ -2,7 +2,8 @@ description = """
 Full polecat work lifecycle for the monorepo rig, with CI validation and AI review handling.
 
 Extends the standard polecat work formula with monorepo-specific post-implementation
-steps: GitHub CI validation and AI review comment handling (CodeRabbit, Greptile).
+steps: GitHub CI validation and automated review comment handling (Cursor Bugbot,
+CodeRabbit, Greptile, Delve).
 
 This molecule guides a polecat through a complete work assignment. Each step
 has clear entry/exit criteria and specific commands to run. A polecat can
@@ -29,8 +30,9 @@ in ~5 seconds instead of re-running gates. If pre-verification is skipped or
 stale, the refinery falls through to normal gate execution.
 
 **Monorepo extras:** After implementation, you push a PR, wait for GitHub Actions
-CI to pass (fixing any failures), then wait for AI reviewers (CodeRabbit, Greptile)
-to post comments and address them all before submitting to the merge queue.
+CI to pass (fixing any failures), then enter a fix-pr loop: wait for all automated
+reviewers (Cursor Bugbot, CodeRabbit, Greptile, Delve) to finish, run /fix-pr to
+address all comments, and repeat until no new actionable comments remain.
 
 **You do NOT:**
 - Push directly to main (Refinery merges from MQ)
@@ -56,7 +58,7 @@ to post comments and address them all before submitting to the merge queue.
 |-----------|--------|
 | Build fails | Fix it. Do not proceed if it won't compile. |
 | CI fails | Diagnose and fix. Re-push until green. |
-| AI reviewer comment | Fix or won't-fix, reply to every comment. |
+| AI reviewer comment | Wait for reviewer to finish, run /fix-pr, loop until clean. |
 | Blocked on external | Mail Witness for help, mark yourself stuck |
 | Context filling | Use gt handoff to cycle to fresh session |
 | Unsure what to do | Mail Witness, don't guess |"""
@@ -387,23 +389,75 @@ git push origin HEAD -u
 gh pr view --json number,url 2>/dev/null
 ```
 
-**3. If no PR exists, create one:**
+**3. If no PR exists, create one using /ship format:**
+
+First, understand the full branch to write a good PR description:
+```bash
+BASE={{base_branch}}
+git log --oneline origin/$BASE..HEAD
+git diff --stat origin/$BASE...HEAD
+bd show {{issue}}    # Get issue context for motivation section
+```
+
+Then create the PR with a type label and structured body:
 ```bash
 gh pr create --title "<type>: <description> ({{issue}})" \
+  --label "type: <feature|fix|refactor|chore|docs|test|dx|security>" \
   --body "$(cat <<'EOF'
+## Context & Motivation
+Why this change is needed. Reference the issue and what triggered the work.
+
 ## Summary
-<1-3 bullet points describing what changed and why>
+- <bullet points describing what changed>
+- <group by concern: schema, API, logic, config, tests>
+
+## Beads
+- Closes: {{issue}}
+
+## Impact Analysis
+**What stays the same**: <existing behavior preserved>
+**What changes**: <specific behavior differences>
+**Edge cases**: <scenarios requiring special handling>
+
+## Backward Compatibility
+<Why this change is safe to deploy — nullable columns, old callers still work, etc.>
+<Omit this section for non-breaking changes>
+
+## Verification
+How to confirm the changes work:
+1. <step-by-step instructions>
+2. <expected outcomes>
+
+**Review focus areas**:
+- <specific files or concepts deserving scrutiny>
 
 ## Test plan
+- [ ] <automated tests covering the changes — name test files>
 - [ ] CI passes
 - [ ] AI review comments addressed
 
-Resolves: {{issue}}
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 )" --repo $(git remote get-url origin | sed 's|.*github.com[:/]||;s|\\.git$||')
 ```
+
+**Omit sections that don't apply.** Specifically:
+- **Impact Analysis**: omit for trivial changes (typos, formatting, dependency bumps)
+- **Backward Compatibility**: omit if no schema, API, or behavioral changes
+- **Verification**: omit for pure test or docs changes
+
+Choose the single most accurate `type:` label:
+
+| Label | When |
+|-------|------|
+| `type: feature` | New capability |
+| `type: fix` | Bug fix |
+| `type: refactor` | Code restructuring, no behavior change |
+| `type: chore` | Maintenance, deps, housekeeping |
+| `type: docs` | Documentation only |
+| `type: test` | Test additions only |
+| `type: dx` | Dev tooling, CI improvements |
+| `type: security` | Security fix or hardening |
 
 **4. If PR already exists, force-push is fine:**
 The PR will update automatically when you push.
@@ -443,46 +497,98 @@ This will:
 
 [[steps]]
 id = "handle-ai-reviews"
-title = "Address AI reviewer comments"
+title = "Address automated review comments (fix-pr loop)"
 needs = ["validate-ci"]
 description = """
-Wait for AI reviewers (CodeRabbit, Greptile) to post their comments, then
-address every single one.
+Wait for all automated reviewers to finish, then run /fix-pr in a loop until
+the PR is clean. Automated reviewers (Cursor Bugbot, CodeRabbit, Greptile,
+Delve) comment after each push, so every fix-pr push may trigger new comments.
 
-**1. Wait for AI reviewers to finish:**
-AI reviewers typically take 5-10 minutes after a push. Check if they've posted:
+**The loop:**
+
+```
+ITERATION=0
+while true:
+  1. Wait for reviewers to finish
+  2. Run /fix-pr
+  3. If /fix-pr pushed new commits → back to 1
+  4. If no changes needed → done
+```
+
+**Step 1: Wait for automated reviewers to complete.**
+
+Gate on GitHub check-run status, not comment count. This handles timing
+variations (Bugbot: ~7 min, CodeRabbit: ~5 min, Delve: ~2 min).
+
 ```bash
 PR_NUMBER=$(gh pr view --json number -q '.number')
 REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
 
-# Check for CodeRabbit/Greptile comments
-COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate | \
-  jq '[.[] | select(.user.login | test("coderabbit|greptile"; "i"))] | length')
+# Poll until all bot check-runs are complete (max 15 minutes)
+for i in $(seq 1 15); do
+  PENDING=$(gh pr checks $PR_NUMBER --json name,status \
+    --jq '[.[] | select(
+      (.name | test("Bugbot|CodeRabbit|Greptile|Delve"; "i")) and
+      (.status != "COMPLETED")
+    )] | length')
 
-echo "AI review comments found: $COMMENT_COUNT"
+  if [ "$PENDING" = "0" ]; then
+    echo "All automated reviewers complete."
+    break
+  fi
+
+  echo "Waiting for $PENDING reviewer check(s)... (attempt $i/15)"
+  sleep 60
+done
 ```
 
-If zero comments yet, wait 2 minutes and check again. Repeat up to 5 times
-(10 minutes total). If still zero after 10 minutes, proceed — they may not
-have triggered for this PR.
+If checks haven't completed after 15 minutes, proceed anyway — some reviewers
+may not have triggered for this PR.
 
-**2. Run the handle-ai-reviews skill:**
+**Step 2: Run /fix-pr to address all current comments.**
+
 ```
-/handle-ai-reviews
+/fix-pr
 ```
 
 This will:
-- Fetch all CodeRabbit and Greptile comments
-- Analyze each suggestion
-- Fix valid issues in code (commit changes)
-- Reply to every comment with decision and reasoning
-- Run /validate-ci again if code was changed
-- Print a summary report
+- Fetch ALL review comments (Bugbot, CodeRabbit, Greptile, Delve, humans)
+- Classify comments by root-cause error class
+- Sweep the entire changeset for unreported instances of the same class
+- Fix valid issues, reply to every comment
+- Push fixes and verify unresolved thread count is zero
 
-**3. If handle-ai-reviews made code changes:**
-The skill runs /validate-ci internally. Verify it passed.
+**Step 3: Check if /fix-pr pushed new commits.**
 
-**Exit criteria:** All AI review comments addressed and replied to. CI still green."""
+```bash
+# Record HEAD before fix-pr
+HEAD_BEFORE=<sha recorded before running /fix-pr>
+
+# After fix-pr completes:
+HEAD_AFTER=$(git rev-parse HEAD)
+
+if [ "$HEAD_BEFORE" != "$HEAD_AFTER" ]; then
+  echo "fix-pr pushed new commits — looping back to wait for reviewers."
+  ITERATION=$((ITERATION + 1))
+  # Safety valve: max 3 iterations to prevent infinite loops
+  if [ "$ITERATION" -ge 5 ]; then
+    echo "WARNING: 5 fix-pr iterations reached. Proceeding to submit."
+    echo "Remaining comments may need human review."
+    # break out of loop
+  fi
+  # Go back to Step 1
+else
+  echo "fix-pr made no changes — PR is clean."
+  # break out of loop
+fi
+```
+
+**Safety valve:** Maximum 5 iterations. If the loop hasn't converged after
+5 rounds of fix-pr, proceed to submit — remaining comments likely need human
+judgment. Note any unresolved items in the PR description.
+
+**Exit criteria:** All automated review comments addressed and replied to
+(or max iterations reached with remaining items noted). CI still green."""
 
 [[steps]]
 id = "submit-and-exit"
@@ -506,12 +612,21 @@ CI is green, AI reviews are addressed — the PR is ready for human review.
 # Ensure latest changes are pushed
 git push origin HEAD
 
-# Exit without submitting to merge queue — the PR is the deliverable
-gt done --no-merge
+# Exit cleanly — the PR is the deliverable
+gt done
 ```
 
+**Important:** When this bead was slung with `--no-merge` (set at dispatch time),
+`gt done` automatically detects the `no_merge` flag on the bead and skips the
+merge queue. It creates a GitHub PR for human review instead. You do NOT need
+to pass `--no-merge` to `gt done` — the flag is on the bead, not the command.
+
+If the bead was NOT slung with `--no-merge`, `gt done` submits to the merge
+queue as normal. The merge strategy is a dispatch-time decision, not yours.
+
 **What happens next (not your concern):**
-- A human engineer reviews and merges the PR
+- A human reviews and approves the PR (branch protection requires 1 approval)
+- The PR is merged via GitHub (not direct push)
 - You are done. The PR speaks for itself.
 
 ## Mode B: Swarm into feature branch (base_branch != main)

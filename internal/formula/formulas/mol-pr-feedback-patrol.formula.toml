@@ -263,8 +263,8 @@ Dispatched by mol-pr-feedback-patrol."
 
   echo "Created bead ${BEAD_ID} for PR #${PR_NUM} (${TYPE})"
 
-  # Sling a polecat to handle it
-  gt sling {{rig}} "$BEAD_ID" 2>/dev/null || echo "Warning: sling failed for ${BEAD_ID}"
+  # Sling a polecat with mol-fix-pr-loop (fixes existing PR, not new implementation)
+  gt sling "$BEAD_ID" {{rig}} --formula mol-fix-pr-loop --var "pr_number=${PR_NUM}" 2>/dev/null || echo "Warning: sling failed for ${BEAD_ID}"
 
 done < /tmp/patrol-findings.txt
 ```

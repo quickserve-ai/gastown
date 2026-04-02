@@ -1646,12 +1646,13 @@ func (t *Tmux) NudgeSessionWithOpts(session, message string, opts NudgeOpts) err
 	// running the agent rather than sending to the focused pane.
 	target := session
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
-		// Qualify the pane ID with the session name (e.g., "hq-dog-alpha:%1")
-		// to avoid ambiguity. On some tmux versions (e.g., 3.3 on Windows),
-		// pane IDs are NOT globally unique — every session may have "%1".
-		// A bare "send-keys -t %1" targets the attached session's pane,
-		// not necessarily this session's. (gt-ect)
-		target = session + ":" + agentPane
+		// Qualify the pane ID with the session name using tmux's
+		// "session:.pane" syntax. The dot is required — "session:%N" is
+		// parsed as a window reference by send-keys (fails with "can't
+		// find window"), while "session:.%N" correctly targets the pane.
+		// display-message is more lenient and accepts both forms, but
+		// send-keys is not. (qc-3p6)
+		target = session + ":." + agentPane
 	}
 
 	// 0. Pre-delivery: dismiss Rewind menu if the session is stuck in it.
@@ -1991,7 +1992,10 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 	// This replaces process-tree inference for sessions that record GT_PANE_ID.
 	if declaredPane, err := t.GetEnvironment(session, "GT_PANE_ID"); err == nil && declaredPane != "" {
 		// Verify the pane still exists in tmux (it may have been killed/respawned).
-		if _, verifyErr := t.run("display-message", "-t", declaredPane, "-p", "#{pane_id}"); verifyErr == nil {
+		// Use "session:.pane" syntax — the dot ensures tmux parses the %ID as a
+		// pane rather than a window reference. (qc-3p6)
+		qualifiedPane := session + ":." + declaredPane
+		if _, verifyErr := t.run("display-message", "-t", qualifiedPane, "-p", "#{pane_id}"); verifyErr == nil {
 			return declaredPane, nil
 		}
 		// Declared pane is gone — fall through to scan.

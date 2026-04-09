@@ -70,6 +70,10 @@ var drainableSubjects = []string{
 	"MERGE_READY",
 	"MERGE_FAILED",
 	"SWARM_START",
+	"DOG_DONE",
+	"CONVOY_NEEDS_FEEDING",
+	"RECOVERED_BEAD",
+	"SPAWN_STORM",
 }
 
 // isDrainableMessage checks if a message subject matches a drainable protocol pattern.

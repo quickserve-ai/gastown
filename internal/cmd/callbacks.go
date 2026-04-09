@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/deacon"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/townlog"
@@ -35,6 +36,16 @@ var (
 	// SLING_REQUEST: <bead-id> - request to sling work
 	patternSling = regexp.MustCompile(`^SLING_REQUEST:\s+(\S+)`)
 
+	// DOG_DONE <hostname> or DOG_DONE: <plugin> <result> - dog completed work
+	patternDogDone = regexp.MustCompile(`^DOG_DONE[:\s]\s*(.+)`)
+
+	// CONVOY_NEEDS_FEEDING <convoy-id> - convoy ready for feeding
+	patternConvoyNeedsFeeding = regexp.MustCompile(`^CONVOY_NEEDS_FEEDING[:\s]\s*(.+)`)
+
+	// RECOVERED_BEAD <bead-id> - witness recovered abandoned bead
+	// Also matches: SPAWN_STORM RECOVERED_BEAD <bead-id> (respawned Nx)
+	patternRecoveredBead = regexp.MustCompile(`^(?:SPAWN_STORM\s+)?RECOVERED_BEAD\s+(\S+)`)
+
 	// NOTE: WITNESS_REPORT and REFINERY_REPORT removed.
 	// Witnesses and Refineries handle their duties autonomously.
 	// They only escalate genuine problems, not routine status updates.
@@ -49,8 +60,11 @@ const (
 	CallbackMergeCompleted CallbackType = "merge_completed"
 	CallbackHelp           CallbackType = "help"
 	CallbackEscalation     CallbackType = "escalation"
-	CallbackSling          CallbackType = "sling"
-	CallbackUnknown        CallbackType = "unknown"
+	CallbackSling              CallbackType = "sling"
+	CallbackDogDone            CallbackType = "dog_done"
+	CallbackConvoyNeedsFeeding CallbackType = "convoy_needs_feeding"
+	CallbackRecoveredBead      CallbackType = "recovered_bead"
+	CallbackUnknown            CallbackType = "unknown"
 	// NOTE: CallbackWitnessReport and CallbackRefineryReport removed.
 	// Routine status reports are no longer sent to Mayor.
 )
@@ -85,17 +99,20 @@ appropriately, routing to other agents or updating state as needed.`,
 var callbacksProcessCmd = &cobra.Command{
 	Use:   "process",
 	Short: "Process pending callbacks",
-	Long: `Process all pending callbacks in the Mayor's inbox.
+	Long: `Process all pending callbacks in agent inboxes.
 
-Reads unread messages from the Mayor's inbox and handles each based on
-its type:
+Reads unread messages from the Mayor's and Deacon's inboxes and handles
+each based on its type:
 
-  POLECAT_DONE       - Log completion, update stats
-  MERGE_COMPLETED    - Notify worker, close source issue
-  MERGE_REJECTED     - Notify worker of rejection reason
-  HELP:              - Route to human or handle if possible
-  ESCALATION:        - Log and route to human
-  SLING_REQUEST:     - Spawn polecat for the work
+  POLECAT_DONE           - Log completion, update stats
+  MERGE_COMPLETED        - Notify worker, close source issue
+  MERGE_REJECTED         - Notify worker of rejection reason
+  HELP:                  - Route to human or handle if possible
+  ESCALATION:            - Log and route to human
+  SLING_REQUEST:         - Spawn polecat for the work
+  DOG_DONE               - Log dog completion (informational)
+  CONVOY_NEEDS_FEEDING   - Archive (daemon handles feeding)
+  RECOVERED_BEAD         - Re-dispatch via deacon redispatch
 
 Note: Witnesses and Refineries handle routine operations autonomously.
 They only send escalations for genuine problems, not status reports.
@@ -123,53 +140,71 @@ func runCallbacksProcess(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Get Mayor's mailbox
 	router := mail.NewRouter(townRoot)
-	mailbox, err := router.GetMailbox("mayor/")
-	if err != nil {
-		return fmt.Errorf("getting mayor mailbox: %w", err)
-	}
 
-	// Get unread messages
-	messages, err := mailbox.ListUnread()
-	if err != nil {
-		return fmt.Errorf("listing unread messages: %w", err)
-	}
-
-	if len(messages) == 0 {
-		fmt.Printf("%s No pending callbacks\n", style.Dim.Render("○"))
-		return nil
-	}
-
-	fmt.Printf("%s Processing %d callback(s)\n", style.Bold.Render("●"), len(messages))
+	// Process both Mayor and Deacon inboxes.
+	// Mayor receives: HELP, ESCALATION, SLING_REQUEST, POLECAT_DONE,
+	//   MERGE_COMPLETED, MERGE_REJECTED
+	// Deacon receives: RECOVERED_BEAD, DOG_DONE, CONVOY_NEEDS_FEEDING
+	mailboxIDs := []string{"mayor/", "deacon/"}
 
 	var results []CallbackResult
-	for _, msg := range messages {
-		result := processCallback(townRoot, msg, callbacksDryRun)
-		results = append(results, result)
-
-		// Print result
-		if result.Error != nil {
-			fmt.Printf("  %s %s: %v\n",
-				style.Error.Render("✗"),
-				msg.Subject,
-				result.Error)
-		} else if result.Handled {
-			fmt.Printf("  %s [%s] %s\n",
-				style.Bold.Render("✓"),
-				result.CallbackType,
-				result.Action)
-		} else {
-			fmt.Printf("  %s [%s] %s\n",
-				style.Dim.Render("○"),
-				result.CallbackType,
-				result.Action)
+	for _, mbID := range mailboxIDs {
+		mailbox, err := router.GetMailbox(mbID)
+		if err != nil {
+			// Non-fatal: mailbox might not exist yet
+			if callbacksVerbose {
+				fmt.Printf("  %s Skipping %s: %v\n", style.Dim.Render("○"), mbID, err)
+			}
+			continue
 		}
 
-		if callbacksVerbose {
-			fmt.Printf("      From: %s\n", msg.From)
-			fmt.Printf("      Subject: %s\n", msg.Subject)
+		messages, err := mailbox.ListUnread()
+		if err != nil {
+			if callbacksVerbose {
+				fmt.Printf("  %s Error reading %s: %v\n", style.Error.Render("✗"), mbID, err)
+			}
+			continue
 		}
+
+		for _, msg := range messages {
+			result := processCallback(townRoot, msg, callbacksDryRun)
+			results = append(results, result)
+
+			// Archive handled messages (unless dry-run)
+			if result.Handled && !callbacksDryRun {
+				_ = mailbox.Delete(msg.ID)
+			}
+
+			// Print result
+			if result.Error != nil {
+				fmt.Printf("  %s %s: %v\n",
+					style.Error.Render("✗"),
+					msg.Subject,
+					result.Error)
+			} else if result.Handled {
+				fmt.Printf("  %s [%s] %s\n",
+					style.Bold.Render("✓"),
+					result.CallbackType,
+					result.Action)
+			} else {
+				fmt.Printf("  %s [%s] %s\n",
+					style.Dim.Render("○"),
+					result.CallbackType,
+					result.Action)
+			}
+
+			if callbacksVerbose {
+				fmt.Printf("      Inbox: %s\n", mbID)
+				fmt.Printf("      From: %s\n", msg.From)
+				fmt.Printf("      Subject: %s\n", msg.Subject)
+			}
+		}
+	}
+
+	if len(results) == 0 {
+		fmt.Printf("%s No pending callbacks\n", style.Dim.Render("○"))
+		return nil
 	}
 
 	// Summary
@@ -237,17 +272,21 @@ func processCallback(townRoot string, msg *mail.Message, dryRun bool) CallbackRe
 		result.Action, result.Error = handleSling(townRoot, msg, dryRun)
 		result.Handled = result.Error == nil
 
+	case CallbackDogDone:
+		result.Action, result.Error = handleDogDone(townRoot, msg, dryRun)
+		result.Handled = result.Error == nil
+
+	case CallbackConvoyNeedsFeeding:
+		result.Action, result.Error = handleConvoyNeedsFeeding(townRoot, msg, dryRun)
+		result.Handled = result.Error == nil
+
+	case CallbackRecoveredBead:
+		result.Action, result.Error = handleRecoveredBead(townRoot, msg, dryRun)
+		result.Handled = result.Error == nil
+
 	default:
 		result.Action = "unknown message type, skipped"
 		result.Handled = false
-	}
-
-	// Archive handled messages (unless dry-run)
-	if result.Handled && !dryRun {
-		router := mail.NewRouter(townRoot)
-		if mailbox, err := router.GetMailbox("mayor/"); err == nil {
-			_ = mailbox.Delete(msg.ID)
-		}
 	}
 
 	return result
@@ -256,6 +295,10 @@ func processCallback(townRoot string, msg *mail.Message, dryRun bool) CallbackRe
 // classifyCallback determines the type of callback from the subject line.
 func classifyCallback(subject string) CallbackType {
 	switch {
+	case patternRecoveredBead.MatchString(subject):
+		// Check before other patterns since SPAWN_STORM prefix could
+		// theoretically match other patterns.
+		return CallbackRecoveredBead
 	case patternPolecatDone.MatchString(subject):
 		return CallbackPolecatDone
 	case patternMergeRejected.MatchString(subject):
@@ -268,6 +311,10 @@ func classifyCallback(subject string) CallbackType {
 		return CallbackEscalation
 	case patternSling.MatchString(subject):
 		return CallbackSling
+	case patternDogDone.MatchString(subject):
+		return CallbackDogDone
+	case patternConvoyNeedsFeeding.MatchString(subject):
+		return CallbackConvoyNeedsFeeding
 	default:
 		return CallbackUnknown
 	}
@@ -499,6 +546,79 @@ func handleSling(townRoot string, msg *mail.Message, dryRun bool) (string, error
 	// executing the sling command based on this request.
 	return fmt.Sprintf("logged sling request: %s to %s (execute with: gt sling %s %s)",
 		beadID, targetRig, beadID, targetRig), nil
+}
+
+// handleDogDone processes a DOG_DONE callback from a dog agent.
+// These are informational — dogs return to idle automatically.
+func handleDogDone(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := patternDogDone.FindStringSubmatch(msg.Subject)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not parse dog info from subject: %q", msg.Subject)
+	}
+	info := strings.TrimSpace(matches[1])
+
+	if dryRun {
+		return fmt.Sprintf("would log dog completion: %s", info), nil
+	}
+
+	logCallback(townRoot, fmt.Sprintf("dog_done: from %s: %s", msg.From, info))
+
+	return fmt.Sprintf("logged dog completion: %s", info), nil
+}
+
+// handleConvoyNeedsFeeding processes a CONVOY_NEEDS_FEEDING callback.
+// The daemon's ConvoyManager handles convoy feeding (event-driven, 5s poll).
+// These messages are archived without further action.
+func handleConvoyNeedsFeeding(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := patternConvoyNeedsFeeding.FindStringSubmatch(msg.Subject)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not parse convoy info from subject: %q", msg.Subject)
+	}
+	info := strings.TrimSpace(matches[1])
+
+	if dryRun {
+		return fmt.Sprintf("would archive convoy feeding notification: %s", info), nil
+	}
+
+	logCallback(townRoot, fmt.Sprintf("convoy_needs_feeding: %s (archived, daemon handles feeding)", info))
+
+	return fmt.Sprintf("archived convoy feeding notification: %s", info), nil
+}
+
+// handleRecoveredBead processes a RECOVERED_BEAD callback from a Witness.
+// Calls deacon.Redispatch which handles rate limiting, cooldown, and
+// automatic escalation to Mayor after repeated failures.
+func handleRecoveredBead(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := patternRecoveredBead.FindStringSubmatch(msg.Subject)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not parse bead ID from subject: %q", msg.Subject)
+	}
+	beadID := matches[1]
+	sourceRig := deacon.ParseRecoveredBeadBody(msg.Body)
+
+	isSpawnStorm := strings.HasPrefix(msg.Subject, "SPAWN_STORM")
+
+	if dryRun {
+		action := fmt.Sprintf("would redispatch %s (source rig: %s)", beadID, sourceRig)
+		if isSpawnStorm {
+			action += " [SPAWN_STORM]"
+		}
+		return action, nil
+	}
+
+	result := deacon.Redispatch(townRoot, beadID, sourceRig, 0, 0)
+
+	context := fmt.Sprintf("recovered_bead: %s from %s → %s", beadID, msg.From, result.Action)
+	if isSpawnStorm {
+		context += " [SPAWN_STORM]"
+	}
+	logCallback(townRoot, context)
+
+	if result.Error != nil {
+		return fmt.Sprintf("redispatch %s: %s", beadID, result.Message), result.Error
+	}
+
+	return fmt.Sprintf("redispatch %s: %s", beadID, result.Message), nil
 }
 
 // logCallback logs a callback processing event to the town log.

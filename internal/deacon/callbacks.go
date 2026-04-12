@@ -9,21 +9,24 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/townlog"
+	"github.com/steveyegge/gastown/internal/witness"
 )
 
-// Callback type patterns — regexes for identifying message types
+// Callback type patterns — regexes for identifying message types from subject lines.
 var (
-	patternPolecatDone    = regexp.MustCompile(`^POLECAT_DONE\s+(\S+)`)
-	patternMergeRejected  = regexp.MustCompile(`^Merge Request Rejected:\s+(.+)`)
-	patternMergeCompleted = regexp.MustCompile(`^Merge Request Completed:\s+(.+)`)
-	patternHelp           = regexp.MustCompile(`^HELP:\s+(.+)`)
-	patternEscalation     = regexp.MustCompile(`^ESCALATION:\s+(.+)`)
-	patternSling          = regexp.MustCompile(`^SLING_REQUEST:\s+(\S+)`)
+	PatternPolecatDone    = regexp.MustCompile(`^POLECAT_DONE\s+(\S+)`)
+	PatternMergeRejected  = regexp.MustCompile(`^Merge Request Rejected:\s+(.+)`)
+	PatternMergeCompleted = regexp.MustCompile(`^Merge Request Completed:\s+(.+)`)
+	PatternHelp           = regexp.MustCompile(`^HELP:\s+(.+)`)
+	PatternEscalation     = regexp.MustCompile(`^ESCALATION:\s+(.+)`)
+	PatternSling          = regexp.MustCompile(`^SLING_REQUEST:\s+(\S+)`)
 )
 
-// CallbackType represents the type of callback message
+// CallbackType represents the type of callback message.
 type CallbackType string
 
 const (
@@ -37,16 +40,12 @@ const (
 )
 
 // CallbackState tracks processed callbacks to avoid duplicate handling.
-// Maps message ID to timestamp when processed.
 type CallbackState struct {
-	// ProcessedMessages tracks which callbacks have been handled
 	ProcessedMessages map[string]time.Time `json:"processed_messages"`
-
-	// LastUpdated is when this state was last modified
-	LastUpdated time.Time `json:"last_updated"`
+	LastUpdated       time.Time            `json:"last_updated"`
 }
 
-// CallbackProcessResult represents the outcome of processing a single callback
+// CallbackProcessResult represents the outcome of processing a single callback.
 type CallbackProcessResult struct {
 	MessageID    string       `json:"message_id"`
 	CallbackType CallbackType `json:"callback_type"`
@@ -57,28 +56,26 @@ type CallbackProcessResult struct {
 	Error        string       `json:"error,omitempty"`
 }
 
-// CallbacksResult is the overall result from processing all callbacks
+// CallbacksResult is the overall result from processing all callbacks.
 type CallbacksResult struct {
-	Processed      int                      `json:"processed"`
-	Failed         int                      `json:"failed"`
-	Skipped        int                      `json:"skipped"`
-	ProcessResults []CallbackProcessResult  `json:"process_results"`
-	Message        string                   `json:"message"`
+	Processed      int                     `json:"processed"`
+	Failed         int                     `json:"failed"`
+	Skipped        int                     `json:"skipped"`
+	ProcessResults []CallbackProcessResult `json:"process_results"`
+	Message        string                  `json:"message"`
 }
 
-// callbackStateFile returns the path to the callbacks state file
+// callbackStateFile returns the path to the callbacks state file.
 func callbackStateFile(townRoot string) string {
 	return filepath.Join(townRoot, "deacon", "callbacks-state.json")
 }
 
 // LoadCallbackState loads the callbacks state from disk.
-// Returns an empty state if the file doesn't exist.
 func LoadCallbackState(townRoot string) *CallbackState {
 	stateFile := callbackStateFile(townRoot)
 
 	data, err := os.ReadFile(stateFile) //nolint:gosec // G304: path constructed from trusted townRoot
 	if err != nil {
-		// File doesn't exist yet — start fresh
 		return &CallbackState{
 			ProcessedMessages: make(map[string]time.Time),
 			LastUpdated:       time.Now().UTC(),
@@ -87,14 +84,12 @@ func LoadCallbackState(townRoot string) *CallbackState {
 
 	var state CallbackState
 	if err := json.Unmarshal(data, &state); err != nil {
-		// Corrupted state file — start fresh
 		return &CallbackState{
 			ProcessedMessages: make(map[string]time.Time),
 			LastUpdated:       time.Now().UTC(),
 		}
 	}
 
-	// Ensure map is initialized
 	if state.ProcessedMessages == nil {
 		state.ProcessedMessages = make(map[string]time.Time)
 	}
@@ -102,16 +97,14 @@ func LoadCallbackState(townRoot string) *CallbackState {
 	return &state
 }
 
-// SaveCallbackState persists the callbacks state to disk
+// SaveCallbackState persists the callbacks state to disk.
 func SaveCallbackState(townRoot string, state *CallbackState) error {
 	stateFile := callbackStateFile(townRoot)
 
-	// Ensure deacon directory exists
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
 		return fmt.Errorf("creating deacon directory: %w", err)
 	}
 
-	// Update timestamp
 	state.LastUpdated = time.Now().UTC()
 
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -126,194 +119,263 @@ func SaveCallbackState(townRoot string, state *CallbackState) error {
 	return nil
 }
 
-// classifyCallback determines the callback type from the message subject
-func classifyCallback(subject string) CallbackType {
-	if patternPolecatDone.MatchString(subject) {
+// ClassifyCallback determines the callback type from the message subject.
+func ClassifyCallback(subject string) CallbackType {
+	switch {
+	case PatternPolecatDone.MatchString(subject):
 		return CallbackTypePolecat
-	}
-	if patternMergeRejected.MatchString(subject) {
+	case PatternMergeRejected.MatchString(subject):
 		return CallbackTypeMergeRejected
-	}
-	if patternMergeCompleted.MatchString(subject) {
+	case PatternMergeCompleted.MatchString(subject):
 		return CallbackTypeMergeComplete
-	}
-	if patternHelp.MatchString(subject) {
+	case PatternHelp.MatchString(subject):
 		return CallbackTypeHelp
-	}
-	if patternEscalation.MatchString(subject) {
+	case PatternEscalation.MatchString(subject):
 		return CallbackTypeEscalation
-	}
-	if patternSling.MatchString(subject) {
+	case PatternSling.MatchString(subject):
 		return CallbackTypeSling
+	default:
+		return CallbackTypeUnknown
 	}
-	return CallbackTypeUnknown
 }
 
-// handlePolecatDone processes a polecat completion signal
-// Extracts polecat name and logs completion status
-func handlePolecatDone(msg *mail.Message) (string, error) {
-	matches := patternPolecatDone.FindStringSubmatch(msg.Subject)
+// HandlePolecatDone processes a POLECAT_DONE callback.
+func HandlePolecatDone(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := PatternPolecatDone.FindStringSubmatch(msg.Subject)
 	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid POLECAT_DONE format")
+		return "", fmt.Errorf("could not parse polecat name from subject: %q", msg.Subject)
 	}
-
 	polecatName := matches[1]
-	bodyLines := strings.Split(msg.Body, "\n")
 
-	var exitType string
-	var issueID string
-	for _, line := range bodyLines {
+	var exitType, issueID string
+	for _, line := range strings.Split(msg.Body, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "exit_type:") {
-			exitType = strings.TrimSpace(strings.TrimPrefix(line, "exit_type:"))
+		if strings.HasPrefix(line, "Exit:") {
+			exitType = strings.TrimSpace(strings.TrimPrefix(line, "Exit:"))
 		}
-		if strings.HasPrefix(line, "issue_id:") {
-			issueID = strings.TrimSpace(strings.TrimPrefix(line, "issue_id:"))
+		if strings.HasPrefix(line, "Issue:") {
+			issueID = strings.TrimSpace(strings.TrimPrefix(line, "Issue:"))
 		}
 	}
 
-	action := fmt.Sprintf("Logged polecat %s completion (exit_type: %s, issue: %s)", polecatName, exitType, issueID)
-	return action, nil
+	if dryRun {
+		return fmt.Sprintf("would log completion for %s (exit=%s, issue=%s)",
+			polecatName, exitType, issueID), nil
+	}
+
+	logCallback(townRoot, fmt.Sprintf("polecat_done: %s completed with %s (issue: %s)",
+		msg.From, exitType, issueID))
+
+	return fmt.Sprintf("logged completion for %s", polecatName), nil
 }
 
-// handleMergeCompleted processes a successful merge notification
-// Extracts branch and merge details from the callback
-func handleMergeCompleted(msg *mail.Message) (string, error) {
-	matches := patternMergeCompleted.FindStringSubmatch(msg.Subject)
+// HandleMergeCompleted processes a merge completion callback from Refinery.
+func HandleMergeCompleted(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := PatternMergeCompleted.FindStringSubmatch(msg.Subject)
 	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid Merge Request Completed format")
+		return "", fmt.Errorf("could not parse branch from subject: %q", msg.Subject)
 	}
-
 	branch := matches[1]
-	bodyLines := strings.Split(msg.Body, "\n")
 
-	var mrID string
-	var sourceIssue string
-	var mergeCommit string
-	for _, line := range bodyLines {
+	var mrID, sourceIssue, mergeCommit string
+	for _, line := range strings.Split(msg.Body, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "mr_id:") {
-			mrID = strings.TrimSpace(strings.TrimPrefix(line, "mr_id:"))
+		if strings.HasPrefix(line, "MR:") {
+			mrID = strings.TrimSpace(strings.TrimPrefix(line, "MR:"))
 		}
-		if strings.HasPrefix(line, "source_issue:") {
-			sourceIssue = strings.TrimSpace(strings.TrimPrefix(line, "source_issue:"))
+		if strings.HasPrefix(line, "Source:") {
+			sourceIssue = strings.TrimSpace(strings.TrimPrefix(line, "Source:"))
 		}
-		if strings.HasPrefix(line, "merge_commit:") {
-			mergeCommit = strings.TrimSpace(strings.TrimPrefix(line, "merge_commit:"))
+		if strings.HasPrefix(line, "Commit:") {
+			mergeCommit = strings.TrimSpace(strings.TrimPrefix(line, "Commit:"))
 		}
 	}
 
-	action := fmt.Sprintf("Logged merge completion for %s (MR: %s, source: %s, commit: %s)", branch, mrID, sourceIssue, mergeCommit)
-	return action, nil
+	if dryRun {
+		return fmt.Sprintf("would close source issue %s (mr=%s, commit=%s)",
+			sourceIssue, mrID, mergeCommit), nil
+	}
+
+	logCallback(townRoot, fmt.Sprintf("merge_completed: branch %s merged (mr=%s, source=%s, commit=%s)",
+		branch, mrID, sourceIssue, mergeCommit))
+
+	if sourceIssue != "" {
+		bd := beads.New(townRoot)
+		reason := fmt.Sprintf("Merged in %s", mergeCommit)
+		if err := bd.CloseWithReason(reason, sourceIssue); err != nil {
+			return fmt.Sprintf("logged merge for %s (could not close %s: %v)",
+				branch, sourceIssue, err), nil
+		}
+	}
+
+	return fmt.Sprintf("logged merge for %s, closed %s", branch, sourceIssue), nil
 }
 
-// handleMergeRejected processes a merge rejection notification
-// Extracts branch and rejection reason
-func handleMergeRejected(msg *mail.Message) (string, error) {
-	matches := patternMergeRejected.FindStringSubmatch(msg.Subject)
+// HandleMergeRejected processes a merge rejection callback from Refinery.
+func HandleMergeRejected(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := PatternMergeRejected.FindStringSubmatch(msg.Subject)
 	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid Merge Request Rejected format")
+		return "", fmt.Errorf("could not parse branch from subject: %q", msg.Subject)
 	}
-
 	branch := matches[1]
-	bodyLines := strings.Split(msg.Body, "\n")
 
 	var reason string
-	for _, line := range bodyLines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "reason:") {
-			reason = strings.TrimSpace(strings.TrimPrefix(line, "reason:"))
-			break
+	if strings.Contains(msg.Body, "Reason:") {
+		parts := strings.SplitN(msg.Body, "Reason:", 2)
+		if len(parts) > 1 {
+			reason = strings.TrimSpace(parts[1])
+			if idx := strings.Index(reason, "\n"); idx > 0 {
+				reason = reason[:idx]
+			}
 		}
 	}
 
-	action := fmt.Sprintf("Logged merge rejection for %s (reason: %s)", branch, reason)
-	return action, nil
-}
-
-// handleHelp processes a help request from an agent
-// Extracts the help topic and logs it for review
-func handleHelp(msg *mail.Message) (string, error) {
-	matches := patternHelp.FindStringSubmatch(msg.Subject)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid HELP format")
+	if dryRun {
+		return fmt.Sprintf("would log rejection for %s (reason: %s)", branch, reason), nil
 	}
 
+	logCallback(townRoot, fmt.Sprintf("merge_rejected: branch %s rejected: %s", branch, reason))
+
+	return fmt.Sprintf("logged rejection for %s", branch), nil
+}
+
+// HandleHelp processes a HELP: request from a polecat.
+// Assesses category and severity and forwards to the overseer.
+func HandleHelp(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	payload, err := witness.ParseHelp(msg.Subject, msg.Body)
+	if err != nil {
+		return "", fmt.Errorf("could not parse help request: %w", err)
+	}
+
+	assessment := witness.AssessHelp(payload)
+
+	if dryRun {
+		return fmt.Sprintf("would forward help request to overseer: %s [%s/%s]",
+			payload.Topic, assessment.Category, assessment.Severity), nil
+	}
+
+	var priority mail.Priority
+	switch assessment.Severity {
+	case witness.HelpSeverityCritical:
+		priority = mail.PriorityUrgent
+	case witness.HelpSeverityHigh:
+		priority = mail.PriorityHigh
+	default:
+		priority = mail.PriorityNormal
+	}
+
+	router := mail.NewRouter(townRoot)
+	defer router.WaitPendingNotifications()
+	fwd := &mail.Message{
+		From:    "mayor/",
+		To:      "overseer",
+		Subject: fmt.Sprintf("[FWD][%s] HELP: %s", strings.ToUpper(string(assessment.Severity)), payload.Topic),
+		Body: fmt.Sprintf("Forwarded from: %s\nAssessment: category=%s severity=%s (suggest → %s)\nRationale: %s\n\n%s",
+			msg.From, assessment.Category, assessment.Severity, assessment.SuggestTo, assessment.Rationale, msg.Body),
+		Priority: priority,
+	}
+	if err := router.Send(fwd); err != nil {
+		return "", fmt.Errorf("forwarding to overseer: %w", err)
+	}
+
+	logCallback(townRoot, fmt.Sprintf("help_request: from %s: %s [%s/%s]",
+		msg.From, payload.Topic, assessment.Category, assessment.Severity))
+
+	return fmt.Sprintf("forwarded help request to overseer: %s [%s/%s]",
+		payload.Topic, assessment.Category, assessment.Severity), nil
+}
+
+// HandleEscalation processes an ESCALATION: from a Witness.
+func HandleEscalation(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := PatternEscalation.FindStringSubmatch(msg.Subject)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not parse topic from subject: %q", msg.Subject)
+	}
 	topic := matches[1]
-	action := fmt.Sprintf("Logged help request from %s on topic: %s", msg.From, topic)
-	return action, nil
-}
 
-// handleEscalation processes an escalation from a witness
-// Escalations require immediate attention from the overseer
-func handleEscalation(msg *mail.Message) (string, error) {
-	matches := patternEscalation.FindStringSubmatch(msg.Subject)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid ESCALATION format")
+	if dryRun {
+		return fmt.Sprintf("would forward escalation to overseer: %s", topic), nil
 	}
 
-	topic := matches[1]
-	action := fmt.Sprintf("Logged escalation from %s on topic: %s - requires investigation", msg.From, topic)
-	return action, nil
-}
-
-// handleSling processes a request to spawn work via the sling system
-// Extracts the bead ID and target rig
-func handleSling(msg *mail.Message) (string, error) {
-	matches := patternSling.FindStringSubmatch(msg.Subject)
-	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid SLING_REQUEST format")
+	router := mail.NewRouter(townRoot)
+	defer router.WaitPendingNotifications()
+	fwd := &mail.Message{
+		From:     "mayor/",
+		To:       "overseer",
+		Subject:  fmt.Sprintf("[ESCALATION] %s", topic),
+		Body:     fmt.Sprintf("Escalated by: %s\n\n%s", msg.From, msg.Body),
+		Priority: mail.PriorityUrgent,
+	}
+	if err := router.Send(fwd); err != nil {
+		return "", fmt.Errorf("forwarding escalation: %w", err)
 	}
 
+	logCallback(townRoot, fmt.Sprintf("escalation: from %s: %s", msg.From, topic))
+
+	return fmt.Sprintf("forwarded escalation to overseer: %s", topic), nil
+}
+
+// HandleSling processes a SLING_REQUEST to spawn work on a polecat.
+func HandleSling(townRoot string, msg *mail.Message, dryRun bool) (string, error) {
+	matches := PatternSling.FindStringSubmatch(msg.Subject)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("could not parse bead ID from subject: %q", msg.Subject)
+	}
 	beadID := matches[1]
-	bodyLines := strings.Split(msg.Body, "\n")
 
 	var targetRig string
-	for _, line := range bodyLines {
+	for _, line := range strings.Split(msg.Body, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "target_rig:") {
-			targetRig = strings.TrimSpace(strings.TrimPrefix(line, "target_rig:"))
-			break
+		if strings.HasPrefix(line, "Rig:") {
+			targetRig = strings.TrimSpace(strings.TrimPrefix(line, "Rig:"))
 		}
 	}
 
-	action := fmt.Sprintf("Logged sling request for bead %s targeting rig %s", beadID, targetRig)
-	return action, nil
+	if targetRig == "" {
+		return "", fmt.Errorf("no target rig specified in sling request")
+	}
+
+	if dryRun {
+		return fmt.Sprintf("would sling %s to %s", beadID, targetRig), nil
+	}
+
+	logCallback(townRoot, fmt.Sprintf("sling_request: bead %s to rig %s", beadID, targetRig))
+
+	return fmt.Sprintf("logged sling request: %s to %s (execute with: gt sling %s %s)",
+		beadID, targetRig, beadID, targetRig), nil
 }
 
-// processCallback handles a single callback message
-// Classifies the message, routes to handler, and returns result
-func processCallback(msg *mail.Message, mailbox *mail.Mailbox) CallbackProcessResult {
+// ProcessSingleCallback handles a single callback message.
+// Classifies the message, routes to the appropriate handler, and returns the result.
+func ProcessSingleCallback(townRoot string, msg *mail.Message, dryRun bool) CallbackProcessResult {
 	result := CallbackProcessResult{
 		MessageID: msg.ID,
 		From:      msg.From,
 		Subject:   msg.Subject,
 	}
 
-	// Classify the callback
-	callbackType := classifyCallback(msg.Subject)
+	callbackType := ClassifyCallback(msg.Subject)
 	result.CallbackType = callbackType
 
-	// Route to appropriate handler
 	var action string
 	var err error
 
 	switch callbackType {
 	case CallbackTypePolecat:
-		action, err = handlePolecatDone(msg)
+		action, err = HandlePolecatDone(townRoot, msg, dryRun)
 	case CallbackTypeMergeComplete:
-		action, err = handleMergeCompleted(msg)
+		action, err = HandleMergeCompleted(townRoot, msg, dryRun)
 	case CallbackTypeMergeRejected:
-		action, err = handleMergeRejected(msg)
+		action, err = HandleMergeRejected(townRoot, msg, dryRun)
 	case CallbackTypeHelp:
-		action, err = handleHelp(msg)
+		action, err = HandleHelp(townRoot, msg, dryRun)
 	case CallbackTypeEscalation:
-		action, err = handleEscalation(msg)
+		action, err = HandleEscalation(townRoot, msg, dryRun)
 	case CallbackTypeSling:
-		action, err = handleSling(msg)
+		action, err = HandleSling(townRoot, msg, dryRun)
 	default:
+		result.Action = "unknown message type, skipped"
 		result.Handled = false
-		result.Error = "unknown callback type"
 		return result
 	}
 
@@ -323,22 +385,24 @@ func processCallback(msg *mail.Message, mailbox *mail.Mailbox) CallbackProcessRe
 		return result
 	}
 
-	// Archive the message (delete from mailbox)
-	if err := mailbox.Delete(msg.ID); err != nil {
-		// Log warning but don't fail — message was processed
-		style.PrintWarning("failed to archive callback %s: %v", msg.ID, err)
-	}
-
 	result.Handled = true
 	result.Action = action
+
+	// Archive handled messages (unless dry-run)
+	if !dryRun {
+		router := mail.NewRouter(townRoot)
+		if mailbox, mErr := router.GetMailbox("mayor/"); mErr == nil {
+			_ = mailbox.Delete(msg.ID)
+		}
+	}
+
 	return result
 }
 
-// ProcessCallbacks is the main patrol step function for handling callbacks.
+// ProcessCallbacks is the main entry point for handling callbacks.
 // It loads the mayor's mailbox, processes all pending callbacks,
-// and persists the state.
-// This function is called from the deacon patrol loop.
-func ProcessCallbacks(townRoot string) (*CallbacksResult, error) {
+// and persists the state. Called from the CLI command and the deacon patrol loop.
+func ProcessCallbacks(townRoot string, dryRun bool) (*CallbacksResult, error) {
 	result := &CallbacksResult{
 		ProcessResults: []CallbackProcessResult{},
 	}
@@ -346,14 +410,14 @@ func ProcessCallbacks(townRoot string) (*CallbacksResult, error) {
 	// Load current state to avoid re-processing
 	state := LoadCallbackState(townRoot)
 
-	// Create mail router to access mayor's mailbox
+	// Access mayor's mailbox
 	router := mail.NewRouter(townRoot)
-	mailbox, err := router.MayorMailbox()
+	mailbox, err := router.GetMailbox("mayor/")
 	if err != nil {
 		return result, fmt.Errorf("accessing mayor mailbox: %w", err)
 	}
 
-	// List unread messages from the mailbox
+	// List unread messages
 	messages, err := mailbox.ListUnread()
 	if err != nil {
 		return result, fmt.Errorf("listing unread messages: %w", err)
@@ -367,8 +431,7 @@ func ProcessCallbacks(townRoot string) (*CallbacksResult, error) {
 			continue
 		}
 
-		// Process the callback
-		procResult := processCallback(&msg, mailbox)
+		procResult := ProcessSingleCallback(townRoot, msg, dryRun)
 		result.ProcessResults = append(result.ProcessResults, procResult)
 
 		if procResult.Handled {
@@ -379,15 +442,21 @@ func ProcessCallbacks(townRoot string) (*CallbacksResult, error) {
 		}
 	}
 
-	// Persist updated state
-	if err := SaveCallbackState(townRoot, state); err != nil {
-		// Log warning but don't fail — callbacks were still processed
-		style.PrintWarning("failed to save callbacks state: %v", err)
+	// Persist updated state (unless dry-run)
+	if !dryRun {
+		if err := SaveCallbackState(townRoot, state); err != nil {
+			style.PrintWarning("failed to save callbacks state: %v", err)
+		}
 	}
 
-	// Generate summary message
 	result.Message = fmt.Sprintf("Processed %d callbacks (%d successful, %d failed, %d skipped)",
 		len(messages), result.Processed, result.Failed, result.Skipped)
 
 	return result, nil
+}
+
+// logCallback logs a callback processing event to the town log.
+func logCallback(townRoot, context string) {
+	logger := townlog.NewLogger(townRoot)
+	_ = logger.Log(townlog.EventCallback, "mayor/", context)
 }

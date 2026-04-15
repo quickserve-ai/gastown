@@ -11,6 +11,12 @@ if [ -n "$GIT_USER" ] && [ -n "$GIT_EMAIL" ]; then
     dolt config --global --add user.email "$GIT_EMAIL"
 fi
 
+# Export ANTHROPIC_API_KEY if provided, so it's available to plugins and subprocesses.
+# The rate-limit-watchdog plugin needs this key to probe the Anthropic API.
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    export ANTHROPIC_API_KEY
+fi
+
 if [ ! -f /gt/mayor/town.json ]; then
     echo "Initializing Gas Town workspace at /gt..."
     /app/gastown/gt install /gt --git

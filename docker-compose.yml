@@ -1,5 +1,6 @@
 # Run with
-# GIT_USER="<your name>" GIT_EMAIL="<your email>" FOLDER="/Users/you/code" docker compose up -d
+# GIT_USER="<your name>" GIT_EMAIL="<your email>" ANTHROPIC_API_KEY="sk-..." FOLDER="/Users/you/code" docker compose up -d
+# ANTHROPIC_API_KEY is required for the rate-limit-watchdog plugin to probe the Anthropic API.
 
 services:
   gastown:
@@ -24,6 +25,7 @@ services:
       IS_SANDBOX: 1
       GIT_USER: ${GIT_USER:-TestUser}
       GIT_EMAIL: ${GIT_EMAIL:-test@example.com}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     volumes:
       # FOLDER must be defined in .env file, e.g. FOLDER=/home/user
       # or provided as an environment variable when running docker compose,

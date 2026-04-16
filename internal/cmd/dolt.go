@@ -304,6 +304,29 @@ formula's backup step (migration-backup-YYYYMMDD-HHMMSS/).`,
 	RunE: runDoltRollback,
 }
 
+var doltReapCmd = &cobra.Command{
+	Use:   "reap",
+	Short: "Kill orphan database connections from dead agent sessions",
+	Long: `Scan the Dolt server's connection pool and kill orphaned connections.
+
+Connections are considered orphaned when:
+  - They've been idle (Sleep) for longer than --max-idle seconds (default: 300)
+  - They're stuck in a query for longer than --max-query seconds (default: 300)
+
+Dead agent sessions (crashed tmux panes, killed processes) leave MySQL
+connections open on the server. These accumulate until the server runs
+out of resources and query processing deadlocks. This command cleans
+them up without requiring a full server restart.
+
+Use --dry-run to preview which connections would be killed.
+
+Examples:
+  gt dolt reap             # Kill idle/stuck connections (>5 min)
+  gt dolt reap --dry-run   # Preview what would be killed
+  gt dolt reap --max-idle 60 --max-query 120  # More aggressive thresholds`,
+	RunE: runDoltReap,
+}
+
 var doltMigrateWispsCmd = &cobra.Command{
 	Use:   "migrate-wisps",
 	Short: "Migrate agent beads from issues to wisps table",
@@ -329,6 +352,10 @@ var (
 	doltMigrateDry   bool
 	doltCleanupDry   bool
 	doltCleanupForce bool
+
+	doltReapDry      bool
+	doltReapMaxIdle  int64
+	doltReapMaxQuery int64
 
 	doltMigrateWispsDry bool
 	doltMigrateWispsDB  string
@@ -358,6 +385,7 @@ func init() {
 	doltCmd.AddCommand(doltFixMetadataCmd)
 	doltCmd.AddCommand(doltRecoverCmd)
 	doltCmd.AddCommand(doltCleanupCmd)
+	doltCmd.AddCommand(doltReapCmd)
 	doltCmd.AddCommand(doltRollbackCmd)
 	doltCmd.AddCommand(doltSyncCmd)
 	doltCmd.AddCommand(doltPullCmd)
@@ -385,6 +413,10 @@ func init() {
 
 	doltMigrateWispsCmd.Flags().BoolVar(&doltMigrateWispsDry, "dry-run", false, "Preview what would be migrated without making changes")
 	doltMigrateWispsCmd.Flags().StringVar(&doltMigrateWispsDB, "db", "", "Target database (default: auto-detect from rig)")
+
+	doltReapCmd.Flags().BoolVar(&doltReapDry, "dry-run", false, "Preview which connections would be killed")
+	doltReapCmd.Flags().Int64Var(&doltReapMaxIdle, "max-idle", 300, "Kill idle (Sleep) connections older than this many seconds")
+	doltReapCmd.Flags().Int64Var(&doltReapMaxQuery, "max-query", 300, "Kill stuck (Query) connections older than this many seconds")
 
 	rootCmd.AddCommand(doltCmd)
 }
@@ -636,6 +668,11 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 		metrics := doltserver.GetHealthMetrics(townRoot)
 		fmt.Printf("\n  %s\n", style.Bold.Render("Resource Metrics:"))
 		fmt.Printf("    Query latency: %v\n", metrics.QueryLatency.Round(time.Millisecond))
+		if metrics.DataPlaneOK {
+			fmt.Printf("    Data plane:    %v\n", metrics.DataPlaneLatency.Round(time.Millisecond))
+		} else {
+			fmt.Printf("    Data plane:    %s\n", style.Bold.Render("HUNG — query executor not responding"))
+		}
 		fmt.Printf("    Connections:   %d / %d (%.0f%%)\n",
 			metrics.Connections, metrics.MaxConnections, metrics.ConnectionPct)
 		fmt.Printf("    Disk usage:    %s\n", metrics.DiskUsageHuman)
@@ -1258,6 +1295,69 @@ func runDoltRecover(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s Dolt server recovered from read-only state\n", style.Bold.Render("✓"))
+	return nil
+}
+
+func runDoltReap(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	running, _, _ := doltserver.IsRunning(townRoot)
+	if !running {
+		return fmt.Errorf("Dolt server is not running")
+	}
+
+	// Show current connections
+	conns, err := doltserver.ListConnections(townRoot)
+	if err != nil {
+		return fmt.Errorf("listing connections: %w", err)
+	}
+
+	fmt.Printf("Active connections: %d\n\n", len(conns))
+
+	hasOrphans := false
+	for _, c := range conns {
+		isOrphan := (c.Command == "Sleep" && c.Time >= doltReapMaxIdle) ||
+			(c.Command == "Query" && c.Time >= doltReapMaxQuery)
+		if isOrphan {
+			hasOrphans = true
+		}
+		marker := " "
+		if isOrphan {
+			marker = "×"
+		}
+		info := c.Info
+		if len(info) > 60 {
+			info = info[:57] + "..."
+		}
+		fmt.Printf("  %s %4d  %-8s  %6ds  %-12s  %s\n",
+			marker, c.ID, c.Command, c.Time, c.DB, info)
+	}
+
+	if !hasOrphans {
+		fmt.Printf("\nNo orphan connections found (idle >%ds or stuck query >%ds)\n",
+			doltReapMaxIdle, doltReapMaxQuery)
+		return nil
+	}
+
+	result, err := doltserver.ReapOrphanConnections(townRoot, doltReapMaxIdle, doltReapMaxQuery, doltReapDry)
+	if err != nil {
+		return fmt.Errorf("reaping connections: %w", err)
+	}
+
+	if doltReapDry {
+		fmt.Printf("\n%s Would kill %d connection(s) (IDs: %v)\n",
+			style.Bold.Render("[dry-run]"), result.Killed, result.KilledIDs)
+	} else {
+		fmt.Printf("\n%s Killed %d orphan connection(s)", style.Bold.Render("✓"), result.Killed)
+		if result.Errors > 0 {
+			fmt.Printf(" (%d errors)", result.Errors)
+		}
+		fmt.Println()
+	}
+
 	return nil
 }
 

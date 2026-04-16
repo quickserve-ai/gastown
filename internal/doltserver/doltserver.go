@@ -3438,6 +3438,14 @@ type HealthMetrics struct {
 	// LastCommitDB is the database that had the most recent commit.
 	LastCommitDB string `json:"last_commit_db,omitempty"`
 
+	// DataPlaneLatency is the time for a SELECT 1 through the full query executor.
+	// Unlike QueryLatency (active_branch, metadata shortcut), this reflects actual
+	// query processing time. A hang here means agent queries will also hang.
+	DataPlaneLatency time.Duration `json:"data_plane_latency_ns"`
+
+	// DataPlaneOK indicates whether the data-plane probe succeeded.
+	DataPlaneOK bool `json:"data_plane_ok"`
+
 	// Healthy indicates whether the server is within acceptable resource limits.
 	Healthy bool `json:"healthy"`
 
@@ -3457,7 +3465,7 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 		metrics.MaxConnections = 1000 // Dolt default
 	}
 
-	// 1. Query latency: time a SELECT active_branch()
+	// 1. Query latency: time a SELECT active_branch() (metadata shortcut)
 	latency, err := MeasureQueryLatency(townRoot)
 	if err == nil {
 		metrics.QueryLatency = latency
@@ -3465,9 +3473,31 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 			metrics.Warnings = append(metrics.Warnings,
 				fmt.Sprintf("query latency %v exceeds 1s threshold — server may be under stress", latency.Round(time.Millisecond)))
 		}
+	} else {
+		metrics.Healthy = false
+		metrics.Warnings = append(metrics.Warnings,
+			fmt.Sprintf("metadata probe failed: %v", err))
 	}
 
-	// 2. Connection count
+	// 2. Data-plane probe: SELECT 1 through the full query executor.
+	// active_branch() is a metadata shortcut that bypasses the executor — it can
+	// succeed while real queries hang. This probe catches that state.
+	dpLatency, dpErr := ProbeDataPlane(townRoot)
+	metrics.DataPlaneLatency = dpLatency
+	if dpErr != nil {
+		metrics.DataPlaneOK = false
+		metrics.Healthy = false
+		metrics.Warnings = append(metrics.Warnings,
+			fmt.Sprintf("DATA-PLANE HUNG: query executor not responding (%v) — agents will also hang; restart with 'gt dolt restart'", dpErr))
+	} else {
+		metrics.DataPlaneOK = true
+		if dpLatency > 3*time.Second {
+			metrics.Warnings = append(metrics.Warnings,
+				fmt.Sprintf("data-plane latency %v — query executor is slow", dpLatency.Round(time.Millisecond)))
+		}
+	}
+
+	// 3. Connection count
 	connCount, err := GetActiveConnectionCount(townRoot)
 	if err == nil {
 		metrics.Connections = connCount
@@ -3478,23 +3508,29 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 				fmt.Sprintf("connection count %d is %.0f%% of max %d — approaching limit",
 					connCount, metrics.ConnectionPct, metrics.MaxConnections))
 		}
+	} else {
+		metrics.Warnings = append(metrics.Warnings,
+			fmt.Sprintf("connection count probe failed: %v", err))
 	}
 
-	// 3. Disk usage
+	// 4. Disk usage
 	diskBytes := dirSize(config.DataDir)
 	metrics.DiskUsageBytes = diskBytes
 	metrics.DiskUsageHuman = formatBytes(diskBytes)
 
-	// 4. Read-only probe: attempt a test write
-	readOnly, _ := CheckReadOnly(townRoot)
+	// 5. Read-only probe: attempt a test write
+	readOnly, roErr := CheckReadOnly(townRoot)
 	metrics.ReadOnly = readOnly
 	if readOnly {
 		metrics.Healthy = false
 		metrics.Warnings = append(metrics.Warnings,
 			"server is in READ-ONLY mode — requires restart to recover")
+	} else if roErr != nil {
+		metrics.Warnings = append(metrics.Warnings,
+			fmt.Sprintf("read-only probe failed: %v", roErr))
 	}
 
-	// 5. Commit freshness: check the most recent commit across all databases.
+	// 6. Commit freshness: check the most recent commit across all databases.
 	// A gap >1 hour suggests writes are failing or the server was recently down.
 	if commitAge, commitDB, err := GetLastCommitAge(townRoot); err == nil {
 		metrics.LastCommitAge = commitAge
@@ -3504,6 +3540,9 @@ func GetHealthMetrics(townRoot string) *HealthMetrics {
 				fmt.Sprintf("last Dolt commit was %v ago (db: %s) — possible commit gap",
 					commitAge.Round(time.Minute), commitDB))
 		}
+	} else {
+		metrics.Warnings = append(metrics.Warnings,
+			fmt.Sprintf("commit freshness probe failed: %v", err))
 	}
 
 	return metrics
@@ -3652,7 +3691,8 @@ func doltSQLWithRecovery(townRoot, rigDB, query string) error {
 func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	config := DefaultConfig(townRoot)
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.User, config.EffectiveHost(), config.Port)
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?readTimeout=10s&writeTimeout=10s",
+		config.User, config.EffectiveHost(), config.Port)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return 0, fmt.Errorf("opening mysql connection: %w", err)
@@ -3666,7 +3706,7 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	defer cancel()
 
 	start := time.Now()
-	var branch string
+	var branch sql.NullString
 	err = db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch)
 	elapsed := time.Since(start)
 
@@ -3677,6 +3717,158 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	return elapsed, nil
 }
 
+// ProbeDataPlane tests that the Dolt query executor can actually process data queries.
+// Unlike active_branch() which is a metadata shortcut, this runs SELECT 1 through the
+// full executor — the same path as agent queries. If this hangs, agents will hang too.
+func ProbeDataPlane(townRoot string) (time.Duration, error) {
+	config := DefaultConfig(townRoot)
+
+	databases, err := ListDatabases(townRoot)
+	if err != nil || len(databases) == 0 {
+		return 0, fmt.Errorf("no databases to probe")
+	}
+
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/%s?readTimeout=10s&writeTimeout=10s",
+		config.User, config.EffectiveHost(), config.Port, databases[0])
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return 0, fmt.Errorf("opening mysql connection: %w", err)
+	}
+	defer db.Close()
+
+	db.SetConnMaxLifetime(5 * time.Second)
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	var one int
+	err = db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		return elapsed, fmt.Errorf("data-plane probe failed (SELECT 1): %w", err)
+	}
+
+	return elapsed, nil
+}
+
+// ConnectionInfo represents a single entry from INFORMATION_SCHEMA.PROCESSLIST.
+type ConnectionInfo struct {
+	ID      int64  `json:"id"`
+	User    string `json:"user"`
+	Host    string `json:"host"`
+	DB      string `json:"db"`
+	Command string `json:"command"`
+	Time    int64  `json:"time_seconds"`
+	State   string `json:"state"`
+	Info    string `json:"info"`
+}
+
+// ListConnections returns all active connections from the Dolt server processlist.
+func ListConnections(townRoot string) ([]ConnectionInfo, error) {
+	config := DefaultConfig(townRoot)
+
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?readTimeout=10s&writeTimeout=10s",
+		config.User, config.EffectiveHost(), config.Port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening connection: %w", err)
+	}
+	defer db.Close()
+	db.SetConnMaxLifetime(5 * time.Second)
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rows, err := db.QueryContext(ctx,
+		"SELECT ID, USER, HOST, IFNULL(DB,''), COMMAND, TIME, IFNULL(STATE,''), IFNULL(INFO,'') FROM INFORMATION_SCHEMA.PROCESSLIST ORDER BY TIME DESC")
+	if err != nil {
+		return nil, fmt.Errorf("querying processlist: %w", err)
+	}
+	defer rows.Close()
+
+	var conns []ConnectionInfo
+	for rows.Next() {
+		var c ConnectionInfo
+		if err := rows.Scan(&c.ID, &c.User, &c.Host, &c.DB, &c.Command, &c.Time, &c.State, &c.Info); err != nil {
+			continue
+		}
+		conns = append(conns, c)
+	}
+	return conns, nil
+}
+
+// ReapResult summarizes a connection reaping operation.
+type ReapResult struct {
+	Inspected int   `json:"inspected"`
+	Killed    int   `json:"killed"`
+	Errors    int   `json:"errors"`
+	KilledIDs []int64 `json:"killed_ids,omitempty"`
+}
+
+// ReapOrphanConnections kills connections that have been idle (Sleep) longer than
+// maxIdleSeconds, or stuck in a query longer than maxQuerySeconds. These correspond
+// to dead agent sessions that didn't clean up their connections.
+//
+// Connections in the Sleep state for >5 minutes are almost certainly orphans from dead
+// agent sessions. Connections stuck in Query for >5 minutes likely indicate a server
+// deadlock — killing them can unstick the server without a full restart.
+func ReapOrphanConnections(townRoot string, maxIdleSeconds, maxQuerySeconds int64, dryRun bool) (*ReapResult, error) {
+	config := DefaultConfig(townRoot)
+	result := &ReapResult{}
+
+	conns, err := ListConnections(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	result.Inspected = len(conns)
+
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?readTimeout=10s&writeTimeout=10s",
+		config.User, config.EffectiveHost(), config.Port)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening kill connection: %w", err)
+	}
+	defer db.Close()
+	db.SetConnMaxLifetime(5 * time.Second)
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	for _, c := range conns {
+		shouldKill := false
+		if c.Command == "Sleep" && c.Time >= maxIdleSeconds {
+			shouldKill = true
+		}
+		if c.Command == "Query" && c.Time >= maxQuerySeconds {
+			shouldKill = true
+		}
+		if !shouldKill {
+			continue
+		}
+
+		if dryRun {
+			result.Killed++
+			result.KilledIDs = append(result.KilledIDs, c.ID)
+			continue
+		}
+
+		_, err := db.ExecContext(ctx, fmt.Sprintf("KILL %d", c.ID))
+		if err != nil {
+			result.Errors++
+			continue
+		}
+		result.Killed++
+		result.KilledIDs = append(result.KilledIDs, c.ID)
+	}
+
+	return result, nil
+}
+
 // GetLastCommitAge returns the age and database name of the most recent Dolt commit
 // across all databases. This detects commit gaps — periods where no writes persisted.
 //
@@ -3685,7 +3877,8 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 func GetLastCommitAge(townRoot string) (time.Duration, string, error) {
 	config := DefaultConfig(townRoot)
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.User, config.EffectiveHost(), config.Port)
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?readTimeout=10s&writeTimeout=10s",
+		config.User, config.EffectiveHost(), config.Port)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return 0, "", fmt.Errorf("opening mysql connection: %w", err)

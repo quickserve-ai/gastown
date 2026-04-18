@@ -167,9 +167,14 @@ git push -u origin <your-branch-name>
 
 ## Step 7: Create Pull Request
 
+Sign internal-repo PRs with your crew identity so reviewers can see at a glance
+who opened the PR and who to follow up with. See
+[bridge/directives/pr-attribution.md](../../../../../bridge/directives/pr-attribution.md)
+for the full policy.
+
 ```bash
 gh pr create --title "<type>: <concise description>" \
-  --body "$(cat <<'EOF'
+  --body "$(cat <<EOF
 ## Summary
 
 - <what changed and why>
@@ -182,12 +187,44 @@ gh pr create --title "<type>: <concise description>" \
 
 <any context reviewers need>
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
+— ${GT_ROLE##*/} (${GT_ROLE})
 EOF
 )"
 ```
 
+The trailing `— ${GT_ROLE##*/} (${GT_ROLE})` expands to e.g.
+`— woodhouse (gastown/crew/woodhouse)`. Use a regular (non-quoted) heredoc
+delimiter so the variable expands.
+
+**Upstream PRs** (steveyegge/\*, third-party OSS): do NOT sign with crew
+identity. Use a quoted heredoc `<<'EOF'` and either leave no footer or use the
+project's own convention.
+
 After creating the PR, note the PR number from the output.
+
+---
+
+## Step 7b: Commenting on PRs
+
+Any comment you leave on a PR — your own or someone else's — gets the same
+signature. Review comments too.
+
+```bash
+gh pr comment <number> --body "$(cat <<EOF
+<your comment>
+
+— ${GT_ROLE##*/} (${GT_ROLE})
+EOF
+)"
+```
+
+For a review with inline comments, include the signature in the summary body:
+
+```bash
+gh pr review <number> --approve --body "LGTM — <reason>
+
+— ${GT_ROLE##*/} (${GT_ROLE})"
+```
 
 ---
 

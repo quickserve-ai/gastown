@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/cli"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -112,14 +113,27 @@ func (m *SessionManager) Start(dogName string, opts SessionStartOptions) error {
 	}
 	instructions := fmt.Sprintf("I am Dog %s.%s IMPORTANT: If your hook is empty and you have no mail, WAIT — the dispatcher is still setting up your assignment. Do NOT search for work, scan directories, or take autonomous action. Check hook (`"+cli.Name()+" hook`) and mail (`"+cli.Name()+" mail inbox`). If neither has work, wait 10 seconds and re-check. Execute only assigned work. When done, run `"+cli.Name()+" dog done` — this clears your work and auto-terminates the session.", dogName, workInfo)
 
+	// Resolve CLAUDE_CONFIG_DIR from accounts.json so the dog's claude process
+	// uses a valid account rather than falling through to ~/.claude/ with
+	// potentially stale/absent credentials. Mirrors deacon.go's spawn path.
+	// Without this, dogs spawn into a tmux session where the claude CLI gets
+	// 401 Invalid credentials on every API call, producing a live-but-useless
+	// session that also blocks respawn via the IsAgentAlive check.
+	accountsPath := constants.MayorAccountsPath(m.townRoot)
+	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
+	if runtimeConfigDir == "" {
+		runtimeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
+	}
+
 	// Use unified session lifecycle.
 	theme := tmux.DogTheme()
 	_, err = session.StartSession(m.tmux, session.SessionConfig{
-		SessionID: sessionID,
-		WorkDir:   kennelDir,
-		Role:      "dog",
-		TownRoot:  m.townRoot,
-		AgentName: dogName,
+		SessionID:        sessionID,
+		WorkDir:          kennelDir,
+		Role:             "dog",
+		TownRoot:         m.townRoot,
+		AgentName:        dogName,
+		RuntimeConfigDir: runtimeConfigDir,
 		Beacon: session.BeaconConfig{
 			Recipient: session.BeaconRecipient("dog", dogName, ""),
 			Sender:    "deacon",

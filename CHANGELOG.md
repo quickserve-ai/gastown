@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gt start --effort <level>`** — Ephemeral session-scoped effort override
+  (low/medium/high/max/xhigh/auto), exported as `GT_EFFORT`. Beats
+  `GT_COST_TIER` and rig/town `role_effort` so operators can push a whole
+  session into `xhigh` or `auto` without editing config.
+- **`xhigh` and `auto` effort levels** — `ValidEffortLevels` now accepts the
+  two levels Claude Code 2.x adds for 4.x-class reasoning. Rigs can opt into
+  deeper reasoning via `role_effort.<role>: xhigh` in `settings/config.json`.
+
 ## [1.0.1] - 2026-04-25
 
 ### Fixed

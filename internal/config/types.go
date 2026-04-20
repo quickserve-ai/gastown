@@ -98,6 +98,14 @@ type TownSettings struct {
 	// Managed by cost-tier presets alongside RoleAgents.
 	RoleEffort map[string]string `json:"role_effort,omitempty"`
 
+	// EffortLock controls whether gt sets CLAUDE_CODE_EFFORT_LEVEL in agent env.
+	// When true (default, omitted), the env var is set, locking the tier for the
+	// session — Claude Code's in-chat /effort command will refuse to override it.
+	// When false, the env var is NOT set, and Claude Code's /effort works normally.
+	// Pointer for tri-state: nil = use default (true), explicit false = unlock.
+	// Rig-level setting overrides town-level.
+	EffortLock *bool `json:"effort_lock,omitempty"`
+
 	// CostTier tracks which cost tier preset was applied (informational).
 	// Actual model assignments live in RoleAgents and Agents.
 	// Values: "standard", "economy", "budget", or empty for custom configs.
@@ -683,6 +691,10 @@ type RigSettings struct {
 	// Values are effort levels: "low", "medium", "high", "max", "xhigh", "auto".
 	// Example: {"crew": "xhigh", "witness": "low"}
 	RoleEffort map[string]string `json:"role_effort,omitempty"`
+
+	// EffortLock controls whether gt sets CLAUDE_CODE_EFFORT_LEVEL in agent env.
+	// Overrides TownSettings.EffortLock for this rig. See TownSettings.EffortLock.
+	EffortLock *bool `json:"effort_lock,omitempty"`
 
 	// DefaultAccount is the default Claude Code account handle for agents in this rig.
 	// When set, agents spawned without an explicit --account flag will use this account,

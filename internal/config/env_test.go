@@ -1367,4 +1367,40 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q (invalid GT_EFFORT should be skipped)", got, "high")
 		}
 	})
+
+	t.Run("effort_lock=false omits CLAUDE_CODE_EFFORT_LEVEL from env", func(t *testing.T) {
+		t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "")
+		t.Setenv("GT_EFFORT", "")
+		townRoot := t.TempDir()
+		unlocked := false
+		if err := SaveTownSettings(TownSettingsPath(townRoot), &TownSettings{
+			EffortLock: &unlocked,
+		}); err != nil {
+			t.Fatalf("SaveTownSettings failed: %v", err)
+		}
+		env := AgentEnv(AgentEnvConfig{
+			Role:     "crew",
+			TownRoot: townRoot,
+		})
+		if _, ok := env["CLAUDE_CODE_EFFORT_LEVEL"]; ok {
+			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL should be unset when effort_lock=false, got %q", env["CLAUDE_CODE_EFFORT_LEVEL"])
+		}
+	})
+
+	t.Run("effort_lock unset defaults to locked (env var present)", func(t *testing.T) {
+		t.Setenv("CLAUDE_CODE_EFFORT_LEVEL", "")
+		t.Setenv("GT_EFFORT", "")
+		townRoot := t.TempDir()
+		// Town settings exist but EffortLock is unset (nil pointer)
+		if err := SaveTownSettings(TownSettingsPath(townRoot), &TownSettings{}); err != nil {
+			t.Fatalf("SaveTownSettings failed: %v", err)
+		}
+		env := AgentEnv(AgentEnvConfig{
+			Role:     "crew",
+			TownRoot: townRoot,
+		})
+		if _, ok := env["CLAUDE_CODE_EFFORT_LEVEL"]; !ok {
+			t.Error("CLAUDE_CODE_EFFORT_LEVEL should be set by default (effort_lock unset → true)")
+		}
+	})
 }

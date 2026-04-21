@@ -47,6 +47,12 @@ type SessionStartOptions struct {
 
 	// AgentOverride specifies an alternate agent (e.g., "gemini", "claude-haiku").
 	AgentOverride string
+
+	// Account is the Claude Code account handle (empty = town default).
+	// Named accounts resolve to ~/.claude-accounts/<handle>/ which stores OAuth
+	// in a file-permission-protected .claude.json, bypassing the Keychain ACLs
+	// that block fresh child processes from reading ~/.claude/ credentials.
+	Account string
 }
 
 // SessionInfo contains information about a running dog session.
@@ -119,8 +125,15 @@ func (m *SessionManager) Start(dogName string, opts SessionStartOptions) error {
 	// Without this, dogs spawn into a tmux session where the claude CLI gets
 	// 401 Invalid credentials on every API call, producing a live-but-useless
 	// session that also blocks respawn via the IsAgentAlive check.
+	//
+	// When opts.Account is non-empty (set via `gt sling ... --account <handle>`),
+	// the dog uses that specific named account; otherwise the town's default
+	// account is used. Named accounts bypass Keychain — their OAuth lives in
+	// ~/.claude-accounts/<handle>/.claude.json with 0600 perms, readable by
+	// fresh launchd-parented children that can't read the Keychain-backed
+	// default ~/.claude account.
 	accountsPath := constants.MayorAccountsPath(m.townRoot)
-	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
+	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, opts.Account)
 	if runtimeConfigDir == "" {
 		runtimeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
 	}

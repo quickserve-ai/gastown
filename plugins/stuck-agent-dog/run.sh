@@ -107,7 +107,7 @@ else
     log "  Process alive: pid=$DEACON_PID comm=$DEACON_COMM"
   fi
 
-  HEARTBEAT_FILE="$TOWN_ROOT/deacon/heartbeat.json"
+  HEARTBEAT_FILE="$TOWN_ROOT/.runtime/heartbeats/hq-deacon.json"
   if [ -f "$HEARTBEAT_FILE" ]; then
     HEARTBEAT_TIME=$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
     NOW=$(date +%s)

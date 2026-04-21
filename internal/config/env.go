@@ -358,6 +358,14 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 
 	// Pass through cloud API credentials and provider configuration from the parent shell.
 	// Only variables explicitly listed here are forwarded; all others are blocked for isolation.
+	//
+	// Fallback: if a key isn't in the parent env, try the secrets file at
+	// $XDG_CONFIG_HOME/gastown/secrets.env (default ~/.config/gastown/secrets.env).
+	// This gives agents spawned by launchd (daemon, dogs) a durable credential
+	// path that survives Keychain ACL tightening — Claude Code's Keychain
+	// creds aren't readable by fresh child processes, and parent-env passthrough
+	// doesn't work when the launchd-parent itself has no ANTHROPIC_API_KEY.
+	secretsFile := loadSecretsFile()
 	for _, key := range []string{
 		// Anthropic API (direct)
 		"ANTHROPIC_API_KEY",
@@ -418,10 +426,80 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	} {
 		if val := os.Getenv(key); val != "" {
 			env[key] = val
+		} else if val, ok := secretsFile[key]; ok && val != "" {
+			env[key] = val
 		}
 	}
 
 	return env
+}
+
+// SecretsFilePath returns the path to the optional per-user secrets file.
+// Location: $XDG_CONFIG_HOME/gastown/secrets.env, defaulting to
+// ~/.config/gastown/secrets.env. Exported for diagnostics (gt doctor).
+func SecretsFilePath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "gastown", "secrets.env")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "gastown", "secrets.env")
+}
+
+// loadSecretsFile reads SecretsFilePath() and returns its KEY=value contents
+// as a map. Returns nil on any failure (missing file, unreadable, bad perms)
+// — the caller treats nil as "no secrets available" and falls through to
+// whatever else is configured.
+//
+// Format: one KEY=value per line. Blank lines and lines starting with '#'
+// are ignored. An optional `export ` prefix is stripped. Values may be
+// wrapped in matching single or double quotes.
+//
+// Permissions: the file must be owner-only (no group/world bits). Loose
+// perms cause a stderr warning and loading is refused — the operator must
+// `chmod 600` the file to opt in. Rationale: this file holds API keys;
+// silently loading a world-readable secrets file would be worse than
+// silently ignoring it.
+func loadSecretsFile() map[string]string {
+	path := SecretsFilePath()
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(os.Stderr, "gastown: %s has loose permissions (%#o); refusing to load (chmod 600 to use)\n", path, info.Mode().Perm())
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		idx := strings.IndexByte(line, '=')
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			val = val[1 : len(val)-1]
+		}
+		if key != "" {
+			out[key] = val
+		}
+	}
+	return out
 }
 
 // sanitizeOTELAttrValue prepares a string for use as a value in OTEL_RESOURCE_ATTRIBUTES.

@@ -1404,3 +1404,102 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadSecretsFile_HydratesWhitelistedKeys(t *testing.T) {
+	// Isolate from any real ~/.config/gastown/secrets.env.
+	cfgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgRoot)
+	gastownDir := filepath.Join(cfgRoot, "gastown")
+	if err := os.MkdirAll(gastownDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Clear parent env so the fallback path is exercised.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+
+	body := `# comment line
+ANTHROPIC_API_KEY=sk-secretkey
+ANTHROPIC_AUTH_TOKEN="bearer-token"
+export AWS_ACCESS_KEY_ID='AKIA-EXAMPLE'
+
+NOT_WHITELISTED=should-not-leak
+`
+	path := filepath.Join(gastownDir, "secrets.env")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := AgentEnv(AgentEnvConfig{Role: "dog", TownRoot: "/town"})
+	if got := env["ANTHROPIC_API_KEY"]; got != "sk-secretkey" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want %q", got, "sk-secretkey")
+	}
+	if got := env["ANTHROPIC_AUTH_TOKEN"]; got != "bearer-token" {
+		t.Errorf("ANTHROPIC_AUTH_TOKEN = %q, want %q (quotes should be stripped)", got, "bearer-token")
+	}
+	if got := env["AWS_ACCESS_KEY_ID"]; got != "AKIA-EXAMPLE" {
+		t.Errorf("AWS_ACCESS_KEY_ID = %q, want %q (export prefix + quotes stripped)", got, "AKIA-EXAMPLE")
+	}
+	if _, leaked := env["NOT_WHITELISTED"]; leaked {
+		t.Error("NOT_WHITELISTED leaked from secrets file into agent env")
+	}
+}
+
+func TestLoadSecretsFile_ParentEnvWinsOverFile(t *testing.T) {
+	cfgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgRoot)
+	gastownDir := filepath.Join(cfgRoot, "gastown")
+	if err := os.MkdirAll(gastownDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "from-parent-shell")
+
+	path := filepath.Join(gastownDir, "secrets.env")
+	if err := os.WriteFile(path, []byte("ANTHROPIC_API_KEY=from-secrets-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := AgentEnv(AgentEnvConfig{Role: "dog", TownRoot: "/town"})
+	if got := env["ANTHROPIC_API_KEY"]; got != "from-parent-shell" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want %q (parent shell should win)", got, "from-parent-shell")
+	}
+}
+
+func TestLoadSecretsFile_RefusesLoosePerms(t *testing.T) {
+	cfgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgRoot)
+	gastownDir := filepath.Join(cfgRoot, "gastown")
+	if err := os.MkdirAll(gastownDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	path := filepath.Join(gastownDir, "secrets.env")
+	if err := os.WriteFile(path, []byte("ANTHROPIC_API_KEY=should-not-load\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	env := AgentEnv(AgentEnvConfig{Role: "dog", TownRoot: "/town"})
+	if got, ok := env["ANTHROPIC_API_KEY"]; ok {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want absent (0644 perms should refuse load)", got)
+	}
+}
+
+func TestLoadSecretsFile_MissingFileIsNoOp(t *testing.T) {
+	cfgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgRoot)
+	// Do NOT create secrets.env.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	env := AgentEnv(AgentEnvConfig{Role: "dog", TownRoot: "/town"})
+	if _, ok := env["ANTHROPIC_API_KEY"]; ok {
+		t.Error("ANTHROPIC_API_KEY should be absent when secrets file missing and parent env empty")
+	}
+}
+
+func TestSecretsFilePath_HonorsXDG(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/xdg/root")
+	want := "/xdg/root/gastown/secrets.env"
+	if got := SecretsFilePath(); got != want {
+		t.Errorf("SecretsFilePath() = %q, want %q", got, want)
+	}
+}

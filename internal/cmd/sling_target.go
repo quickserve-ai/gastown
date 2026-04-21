@@ -167,6 +167,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			WorkDesc:          workDesc,
 			DelaySessionStart: true,
 			AgentOverride:     opts.Agent,
+			Account:           opts.Account,
 		}
 		dispatchInfo, err := DispatchToDog(dogName, dispatchOpts)
 		if err != nil {

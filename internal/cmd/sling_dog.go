@@ -57,6 +57,7 @@ type DogDispatchOptions struct {
 	WorkDesc          string // Work description (formula or bead ID)
 	DelaySessionStart bool   // If true, don't start session (caller will start later)
 	AgentOverride     string // Agent override (e.g., "codex", "gemini")
+	Account           string // Account handle (empty = town default); named accounts bypass Keychain so fresh child processes can read OAuth
 }
 
 // DogDispatchInfo contains information about a dog dispatch.
@@ -71,6 +72,7 @@ type DogDispatchInfo struct {
 	townRoot       string
 	workDesc       string
 	agentOverride  string
+	account        string
 	rigsConfig     *config.RigsConfig
 }
 
@@ -161,6 +163,7 @@ func DispatchToDog(dogName string, opts DogDispatchOptions) (*DogDispatchInfo, e
 			townRoot:       townRoot,
 			workDesc:       opts.WorkDesc,
 			agentOverride:  opts.AgentOverride,
+			account:        opts.Account,
 			rigsConfig:     rigsConfig,
 		}, nil
 	}
@@ -172,6 +175,7 @@ func DispatchToDog(dogName string, opts DogDispatchOptions) (*DogDispatchInfo, e
 	sessOpts := dog.SessionStartOptions{
 		WorkDesc:      opts.WorkDesc,
 		AgentOverride: opts.AgentOverride,
+		Account:       opts.Account,
 	}
 	pane, err := sessMgr.EnsureRunning(targetDog.Name, sessOpts)
 	if err != nil {
@@ -202,6 +206,7 @@ func (d *DogDispatchInfo) StartDelayedSession() (string, error) {
 	opts := dog.SessionStartOptions{
 		WorkDesc:      d.workDesc,
 		AgentOverride: d.agentOverride,
+		Account:       d.account,
 	}
 	pane, err := sessMgr.EnsureRunning(d.DogName, opts)
 	if err != nil {

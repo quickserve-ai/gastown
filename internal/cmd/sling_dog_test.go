@@ -72,6 +72,7 @@ func TestDogDispatchInfoDelayedSession(t *testing.T) {
 		sessionDelayed: true,
 		townRoot:       "/tmp/test",
 		workDesc:       "test-work",
+		account:        "qconcierge",
 	}
 
 	// Verify initial state
@@ -80,6 +81,9 @@ func TestDogDispatchInfoDelayedSession(t *testing.T) {
 	}
 	if !info.sessionDelayed {
 		t.Error("sessionDelayed should be true for delayed dispatch")
+	}
+	if info.account != "qconcierge" {
+		t.Errorf("account should be carried through for delayed dispatch, got %q", info.account)
 	}
 
 	// Note: We can't test StartDelayedSession without mocking tmux,
@@ -92,6 +96,7 @@ func TestDogDispatchOptionsStruct(t *testing.T) {
 		Create:            true,
 		WorkDesc:          constants.MolConvoyFeed,
 		DelaySessionStart: true,
+		Account:           "qconcierge",
 	}
 
 	if !opts.Create {
@@ -102,6 +107,9 @@ func TestDogDispatchOptionsStruct(t *testing.T) {
 	}
 	if !opts.DelaySessionStart {
 		t.Error("DelaySessionStart should be true")
+	}
+	if opts.Account != "qconcierge" {
+		t.Errorf("Account = %q, want %q", opts.Account, "qconcierge")
 	}
 }
 

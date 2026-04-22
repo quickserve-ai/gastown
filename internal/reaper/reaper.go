@@ -768,47 +768,14 @@ type ClosePluginReceiptResult struct {
 	Anomalies []Anomaly `json:"anomalies,omitempty"`
 }
 
-// ClosePluginReceipts closes open issues labeled "type:plugin-run" that are
-// older than maxAge. These are transient run receipts created by deacon dog
-// plugins; they should be closed shortly after creation since they exist only
-// for audit/cooldown-gate purposes. The standard AutoClose path requires 7 days
-// of staleness, which lets plugin receipts accumulate into the hundreds.
-func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
-	defer cancel()
-
-	cutoff := time.Now().UTC().Add(-maxAge)
-	result := &ClosePluginReceiptResult{Database: dbName, DryRun: dryRun}
-
-	// Find open issues with the "type:plugin-run" label older than maxAge.
-	selectQuery := fmt.Sprintf(`
-		SELECT i.id FROM `+"`%s`"+`.issues i
-		INNER JOIN `+"`%s`"+`.labels l ON i.id = l.issue_id
-		WHERE i.status IN ('open', 'in_progress')
-		AND l.label = 'type:plugin-run'
-		AND i.created_at < ?`, dbName, dbName)
-
-	rows, err := db.QueryContext(ctx, selectQuery, cutoff)
-	if err != nil {
-		if isTableNotFound(err) {
-			return result, nil
-		}
-		return nil, fmt.Errorf("select plugin receipts: %w", err)
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan plugin receipt id: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-
-	result.Closed = len(ids)
+// closeOpenByIDs is the shared write path for plugin fast-track close
+// functions. It marks every id in the given table as closed (status+closed_at)
+// inside an autocommit-off block, commits via both SQL COMMIT and DOLT_COMMIT,
+// and reports commit failures as Anomalies so callers can surface them without
+// failing the whole reaper cycle. Returns nil if ids is empty or dryRun.
+func closeOpenByIDs(ctx context.Context, db *sql.DB, qualifiedTable string, ids []string, commitMsg string, dryRun bool) ([]Anomaly, error) {
 	if len(ids) == 0 || dryRun {
-		return result, nil
+		return nil, nil
 	}
 
 	if _, err := db.ExecContext(ctx, "SET @@autocommit = 0"); err != nil {
@@ -825,28 +792,110 @@ func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun
 		args[i] = id
 	}
 	updateQuery := fmt.Sprintf(
-		"UPDATE `%s`.issues SET status = 'closed', closed_at = NOW() WHERE id IN (%s)",
-		dbName, strings.Join(placeholders, ","))
+		"UPDATE %s SET status = 'closed', closed_at = NOW() WHERE id IN (%s)",
+		qualifiedTable, strings.Join(placeholders, ","))
 	if _, err := db.ExecContext(ctx, updateQuery, args...); err != nil {
-		return nil, fmt.Errorf("close plugin receipts: %w", err)
+		return nil, fmt.Errorf("close rows in %s: %w", qualifiedTable, err)
 	}
 
-	// Flush and commit.
+	var anomalies []Anomaly
 	if _, err := db.ExecContext(ctx, "COMMIT"); err != nil {
-		result.Anomalies = append(result.Anomalies, Anomaly{
+		anomalies = append(anomalies, Anomaly{
 			Type:    "sql_commit_failed",
-			Message: fmt.Sprintf("sql commit after plugin receipt close failed: %v", err),
+			Message: fmt.Sprintf("sql commit after close in %s failed: %v", qualifiedTable, err),
 		})
-		return result, nil
+		return anomalies, nil
 	}
-	commitMsg := fmt.Sprintf("reaper: close %d plugin receipts in %s", len(ids), dbName)
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s')", commitMsg)); err != nil { //nolint:gosec // G201: commitMsg from safe values
 		if !isNothingToCommit(err) {
-			result.Anomalies = append(result.Anomalies, Anomaly{
+			anomalies = append(anomalies, Anomaly{
 				Type:    "dolt_commit_failed",
-				Message: fmt.Sprintf("dolt commit after plugin receipt close failed: %v", err),
+				Message: fmt.Sprintf("dolt commit after close in %s failed: %v", qualifiedTable, err),
 			})
 		}
+	}
+	return anomalies, nil
+}
+
+// selectIDsByLabel returns the ids of rows in (itemsTable, labelsTable) that
+// match labelValue, are open, and were created before cutoff. Returns an
+// empty slice (no error) if the schema is missing. Used by the plugin
+// fast-track close functions which query both issues/labels and
+// wisps/wisp_labels — the same schema shape covers both.
+func selectIDsByLabel(ctx context.Context, db *sql.DB, dbName, itemsTable, labelsTable, labelValue string, cutoff time.Time) ([]string, error) {
+	query := fmt.Sprintf(`
+		SELECT i.id FROM `+"`%s`"+`.%s i
+		INNER JOIN `+"`%s`"+`.%s l ON i.id = l.issue_id
+		WHERE i.status IN ('open', 'in_progress')
+		AND l.label = ?
+		AND i.created_at < ?`, dbName, itemsTable, dbName, labelsTable)
+
+	rows, err := db.QueryContext(ctx, query, labelValue, cutoff)
+	if err != nil {
+		if isTableNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("select %s by label %s: %w", itemsTable, labelValue, err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan %s id: %w", itemsTable, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// ClosePluginReceipts closes open records labeled "type:plugin-run" that are
+// older than maxAge. These are transient run receipts created by deacon dog
+// plugins; they should be closed shortly after creation since they exist only
+// for audit/cooldown-gate purposes. The standard AutoClose path requires 7 days
+// of staleness, which lets plugin receipts accumulate into the hundreds.
+//
+// Most type:plugin-run records (~92% in the hq database as of 2026-04-22) are
+// created with --ephemeral and live in the wisps table, not issues. This
+// function therefore runs the fast-track close against BOTH tables and sums
+// the results.
+func ClosePluginReceipts(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	result := &ClosePluginReceiptResult{Database: dbName, DryRun: dryRun}
+
+	issueIDs, err := selectIDsByLabel(ctx, db, dbName, "issues", "labels", "type:plugin-run", cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("select plugin receipts (issues): %w", err)
+	}
+	wispIDs, err := selectIDsByLabel(ctx, db, dbName, "wisps", "wisp_labels", "type:plugin-run", cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("select plugin receipts (wisps): %w", err)
+	}
+
+	result.Closed = len(issueIDs) + len(wispIDs)
+	if result.Closed == 0 || dryRun {
+		return result, nil
+	}
+
+	if len(issueIDs) > 0 {
+		commitMsg := fmt.Sprintf("reaper: close %d plugin receipts (issues) in %s", len(issueIDs), dbName)
+		anomalies, err := closeOpenByIDs(ctx, db, fmt.Sprintf("`%s`.issues", dbName), issueIDs, commitMsg, dryRun)
+		if err != nil {
+			return nil, fmt.Errorf("close plugin receipts (issues): %w", err)
+		}
+		result.Anomalies = append(result.Anomalies, anomalies...)
+	}
+	if len(wispIDs) > 0 {
+		commitMsg := fmt.Sprintf("reaper: close %d plugin receipts (wisps) in %s", len(wispIDs), dbName)
+		anomalies, err := closeOpenByIDs(ctx, db, fmt.Sprintf("`%s`.wisps", dbName), wispIDs, commitMsg, dryRun)
+		if err != nil {
+			return nil, fmt.Errorf("close plugin receipts (wisps): %w", err)
+		}
+		result.Anomalies = append(result.Anomalies, anomalies...)
 	}
 
 	return result, nil
@@ -936,6 +985,69 @@ func ClosePluginDispatches(db *sql.DB, dbName string, maxAge time.Duration, dryR
 			})
 		}
 	}
+
+	return result, nil
+}
+
+// ClosePluginAcks closes short-lived mail ack wisps that notify the daemon a
+// plugin or dog finished. These are posted by deacon/ (and its dogs) in reply
+// to daemon-originated "Plugin:" / "DOG_DONE:" mails; they carry the label
+// "from:deacon/" (or "from:deacon/dogs/%") and have no fast-track path in
+// ClosePluginDispatches (which filters on from:daemon). Without this, the
+// acks age out only at max_age=24h — ~756/day in hq alone, per hq-3cb8u.
+//
+// The ack beads are created with --ephemeral so they live in the wisps table,
+// not issues. This function queries wisps × wisp_labels only.
+//
+// Title-shape match: "Re: Plugin: %" or "Re: DOG_DONE: %".
+// Sender match: any label starting with "from:deacon/" — covers both
+// "from:deacon/" (the deacon itself) and "from:deacon/dogs/<name>".
+func ClosePluginAcks(db *sql.DB, dbName string, maxAge time.Duration, dryRun bool) (*ClosePluginReceiptResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
+	defer cancel()
+
+	cutoff := time.Now().UTC().Add(-maxAge)
+	result := &ClosePluginReceiptResult{Database: dbName, DryRun: dryRun}
+
+	// Wisps table schema mirrors issues for the relevant columns (id, status,
+	// title, created_at, closed_at) — see internal/doltserver/wisps_migrate.go.
+	selectQuery := fmt.Sprintf(`
+		SELECT w.id FROM `+"`%s`"+`.wisps w
+		INNER JOIN `+"`%s`"+`.wisp_labels lf ON w.id = lf.issue_id
+		WHERE w.status IN ('open', 'in_progress')
+		AND (w.title LIKE 'Re: Plugin:%%' OR w.title LIKE 'Re: DOG_DONE:%%')
+		AND lf.label LIKE 'from:deacon/%%'
+		AND w.created_at < ?`, dbName, dbName)
+
+	rows, err := db.QueryContext(ctx, selectQuery, cutoff)
+	if err != nil {
+		if isTableNotFound(err) {
+			return result, nil
+		}
+		return nil, fmt.Errorf("select plugin acks: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan plugin ack id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+
+	result.Closed = len(ids)
+	if result.Closed == 0 || dryRun {
+		return result, nil
+	}
+
+	commitMsg := fmt.Sprintf("reaper: close %d plugin acks in %s", len(ids), dbName)
+	anomalies, err := closeOpenByIDs(ctx, db, fmt.Sprintf("`%s`.wisps", dbName), ids, commitMsg, dryRun)
+	if err != nil {
+		return nil, fmt.Errorf("close plugin acks: %w", err)
+	}
+	result.Anomalies = append(result.Anomalies, anomalies...)
 
 	return result, nil
 }

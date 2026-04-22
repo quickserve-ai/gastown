@@ -2,6 +2,7 @@ package deacon
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,6 +21,11 @@ type mockTmux struct {
 	sessionInfo      *tmux.SessionInfo
 	sessionInfoErr   error
 	sendKeysErr      error
+
+	// Session environment returned by GetEnvironment.
+	// Looked up by key — most tests only need GT_AGENT.
+	env    map[string]string
+	envErr error
 
 	// Call tracking
 	killCalls       []string
@@ -51,7 +57,16 @@ func (m *mockTmux) NewSessionWithCommandAndEnv(_, _, _ string, _ map[string]stri
 
 func (m *mockTmux) SetRemainOnExit(_ string, _ bool) error { return nil }
 func (m *mockTmux) SetEnvironment(_, _, _ string) error    { return nil }
-func (m *mockTmux) GetPaneID(_ string) (string, error)     { return "%0", nil }
+func (m *mockTmux) GetEnvironment(_, key string) (string, error) {
+	if m.envErr != nil {
+		return "", m.envErr
+	}
+	if v, ok := m.env[key]; ok {
+		return v, nil
+	}
+	return "", fmt.Errorf("env %q not found", key)
+}
+func (m *mockTmux) GetPaneID(_ string) (string, error) { return "%0", nil }
 func (m *mockTmux) ConfigureGasTownSession(_ string, _ *tmux.Theme, _, _, _ string) error {
 	return nil
 }
@@ -107,15 +122,85 @@ func TestManager_deaconDir(t *testing.T) {
 }
 
 func TestStart_AlreadyRunning(t *testing.T) {
+	// Stored agent matches what config resolves to — default is "claude"
+	// in a pristine TempDir town, and ExpectedAgentName returns the same.
 	mock := &mockTmux{
 		hasSessionResult: true,
 		agentAlive:       true,
+		env:              map[string]string{"GT_AGENT": "claude"},
 	}
 	m := newTestManager(t.TempDir(), mock)
 
 	err := m.Start("")
 	if !errors.Is(err, ErrAlreadyRunning) {
 		t.Errorf("Start() error = %v, want ErrAlreadyRunning", err)
+	}
+	if len(mock.killCalls) != 0 {
+		t.Errorf("expected no kill calls, got %d", len(mock.killCalls))
+	}
+}
+
+func TestStart_AgentDrift_KillsAndRecreates(t *testing.T) {
+	// Session is healthy but was created when role_agents.deacon was a
+	// different agent. Stored GT_AGENT no longer matches what config
+	// resolves to → Manager should kill and recreate, not short-circuit
+	// with ErrAlreadyRunning.
+	//
+	// TempDir has no town settings, so ResolveRoleAgentConfig falls back
+	// to "claude". Simulate drift by storing a different agent.
+	mock := &mockTmux{
+		hasSessionResult: true,
+		agentAlive:       true,
+		env:              map[string]string{"GT_AGENT": "claude-haiku"},
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	// Start proceeds past the kill into config/session creation, which
+	// may error in the test environment — that's fine, we're verifying
+	// the drift-kill path, not the spawn.
+	_ = m.Start("")
+
+	if len(mock.killCalls) != 1 {
+		t.Fatalf("expected 1 kill call for drift, got %d", len(mock.killCalls))
+	}
+	if mock.killCalls[0] != m.SessionName() {
+		t.Errorf("killed %q, want %q", mock.killCalls[0], m.SessionName())
+	}
+}
+
+func TestStart_AgentDrift_MissingEnvTreatedAsDrift(t *testing.T) {
+	// Legacy session predates GT_AGENT (or tmux env got cleared): we
+	// cannot prove the baked-in command is correct, so rebuild.
+	mock := &mockTmux{
+		hasSessionResult: true,
+		agentAlive:       true,
+		// No env map entry for GT_AGENT → GetEnvironment returns error.
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	_ = m.Start("")
+
+	if len(mock.killCalls) != 1 {
+		t.Errorf("missing GT_AGENT should trigger drift-kill, got %d kill calls", len(mock.killCalls))
+	}
+}
+
+func TestStart_AgentOverrideMatchesStored(t *testing.T) {
+	// Explicit agent override wins over config resolution. If the
+	// override matches the stored agent, the session is already correct.
+	mock := &mockTmux{
+		hasSessionResult: true,
+		agentAlive:       true,
+		env:              map[string]string{"GT_AGENT": "gemini"},
+	}
+	m := newTestManager(t.TempDir(), mock)
+
+	err := m.Start("gemini")
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Errorf("Start(gemini) error = %v, want ErrAlreadyRunning", err)
+	}
+	if len(mock.killCalls) != 0 {
+		t.Errorf("override matching stored should not kill, got %d kill calls", len(mock.killCalls))
 	}
 }
 

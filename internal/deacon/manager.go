@@ -28,6 +28,7 @@ type tmuxOps interface {
 	NewSessionWithCommand(name, workDir, command string) error
 	SetRemainOnExit(pane string, on bool) error
 	SetEnvironment(session, key, value string) error
+	GetEnvironment(session, key string) (string, error)
 	GetPaneID(session string) (string, error)
 	ConfigureGasTownSession(session string, theme *tmux.Theme, rig, worker, role string) error
 	WaitForCommand(session string, excludeCommands []string, timeout time.Duration) error
@@ -72,35 +73,54 @@ func (m *Manager) deaconDir() string {
 // Start starts the deacon session.
 // agentOverride allows specifying an alternate agent alias (e.g., for testing).
 // Restarts are handled by daemon via ensureDeaconRunning on each heartbeat.
+//
+// If an existing session is alive but its stored GT_AGENT differs from what
+// role_agents currently resolves to, the session is killed and recreated.
+// This is needed because tmux auto-respawn replays the session's baked-in
+// pane_start_command — stale after role_agents/default_agent config changes.
 func (m *Manager) Start(agentOverride string) error {
 	t := m.tmux
 	sessionID := m.SessionName()
+
+	// Ensure deacon directory exists — needed for config resolution below.
+	deaconDir := m.deaconDir()
+	if err := os.MkdirAll(deaconDir, 0755); err != nil {
+		return fmt.Errorf("creating deacon directory: %w", err)
+	}
+
+	// Resolve the agent we would spawn right now. Used both to detect drift
+	// against an existing session's stored GT_AGENT and, on the spawn path,
+	// to write runtime settings + startup command.
+	runtimeConfig := config.ResolveRoleAgentConfig("deacon", m.townRoot, deaconDir)
+	expectedAgent := session.ExpectedAgentName(agentOverride, runtimeConfig)
 
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
 		// Session exists - check if agent is actually running (healthy vs zombie)
 		if t.IsAgentAlive(sessionID) {
-			return ErrAlreadyRunning
+			// Session is healthy, but the session's pane_start_command was
+			// baked in at creation time. If role_agents has changed since
+			// then, the stored command is stale — auto-respawn would replay
+			// the wrong agent. Compare stored GT_AGENT to what config
+			// currently resolves to; rebuild on mismatch.
+			if !session.AgentDrift(t.GetEnvironment, sessionID, expectedAgent) {
+				return ErrAlreadyRunning
+			}
+			// Drift detected — fall through to the kill-and-recreate path.
 		}
 
-		// Session exists but agent is dead. Kill and recreate uniformly.
+		// Session exists but either agent is dead (zombie) or stored agent
+		// drifted from current config. Kill and recreate uniformly.
 		// The auto-respawn hook (SetAutoRespawnHook) handles clean exits at the
 		// tmux level — Go doesn't need to distinguish dead pane vs zombie shell.
 		// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 		if err := t.KillSessionWithProcesses(sessionID); err != nil {
-			return fmt.Errorf("killing zombie session: %w", err)
+			return fmt.Errorf("killing stale session: %w", err)
 		}
 	}
 
-	// Ensure deacon directory exists
-	deaconDir := m.deaconDir()
-	if err := os.MkdirAll(deaconDir, 0755); err != nil {
-		return fmt.Errorf("creating deacon directory: %w", err)
-	}
-
 	// Ensure runtime settings exist in deaconDir where session runs.
-	runtimeConfig := config.ResolveRoleAgentConfig("deacon", m.townRoot, deaconDir)
 	if err := runtime.EnsureSettingsForRole(deaconDir, deaconDir, "deacon", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}

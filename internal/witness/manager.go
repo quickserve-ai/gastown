@@ -116,34 +116,61 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		return fmt.Errorf("foreground mode is deprecated; use background mode (remove --foreground flag)")
 	}
 
+	// Resolve what agent we would spawn right now. Used both to detect drift
+	// against an existing session's stored GT_AGENT and, on the spawn path,
+	// to write runtime settings + startup command.
+	townRoot := m.townRoot()
+	runtimeConfig := config.ResolveRoleAgentConfig("witness", townRoot, m.rig.Path)
+	expectedAgent := session.ExpectedAgentName(agentOverride, runtimeConfig)
+
 	// Check if session already exists
 	running, _ := t.HasSession(sessionID)
 	if running {
 		// Session exists - check if Claude is actually running (healthy vs zombie)
 		if t.IsAgentAlive(sessionID) {
-			// Healthy - Claude is running
-			return ErrAlreadyRunning
-		}
-		// Zombie detected — tmux alive but agent dead.
-		// Mitigate TOCTOU gap: the agent may be slow to start, appearing
-		// dead during initialization. Record session creation time, wait
-		// briefly, then re-verify before killing to avoid destroying a
-		// session that just became healthy.
-		createdAt, _ := t.GetSessionCreatedUnix(sessionID)
-		time.Sleep(constants.ZombieKillGracePeriod)
+			// Session is healthy, but the session's pane_start_command was
+			// baked in at creation time. If role_agents has changed since
+			// then, the stored command is stale — auto-respawn would replay
+			// the wrong agent. Compare stored GT_AGENT to what config
+			// currently resolves to; rebuild on mismatch.
+			if !session.AgentDrift(t.GetEnvironment, sessionID, expectedAgent) {
+				return ErrAlreadyRunning
+			}
+			// Drift detected — kill and recreate with fresh command.
+			if err := t.KillSession(sessionID); err != nil {
+				return fmt.Errorf("killing stale session: %w", err)
+			}
+		} else {
+			// Zombie detected — tmux alive but agent dead.
+			// Mitigate TOCTOU gap: the agent may be slow to start, appearing
+			// dead during initialization. Record session creation time, wait
+			// briefly, then re-verify before killing to avoid destroying a
+			// session that just became healthy.
+			createdAt, _ := t.GetSessionCreatedUnix(sessionID)
+			time.Sleep(constants.ZombieKillGracePeriod)
 
-		// Re-check: abort kill if agent started or session was replaced
-		if t.IsAgentAlive(sessionID) {
-			return ErrAlreadyRunning
-		}
-		if createdNow, _ := t.GetSessionCreatedUnix(sessionID); createdAt > 0 && createdNow != createdAt {
-			// Session was replaced between checks — another process already
-			// handled the zombie. Treat as already running; caller can retry.
-			return ErrAlreadyRunning
-		}
+			// Re-check: abort kill if agent started or session was replaced
+			if t.IsAgentAlive(sessionID) {
+				// Agent came back alive during the grace window — but still
+				// apply the drift check, since the session we nearly killed
+				// may be running a stale command.
+				if !session.AgentDrift(t.GetEnvironment, sessionID, expectedAgent) {
+					return ErrAlreadyRunning
+				}
+				if err := t.KillSession(sessionID); err != nil {
+					return fmt.Errorf("killing stale session: %w", err)
+				}
+			} else {
+				if createdNow, _ := t.GetSessionCreatedUnix(sessionID); createdAt > 0 && createdNow != createdAt {
+					// Session was replaced between checks — another process already
+					// handled the zombie. Treat as already running; caller can retry.
+					return ErrAlreadyRunning
+				}
 
-		if err := t.KillSession(sessionID); err != nil {
-			return fmt.Errorf("killing zombie session: %w", err)
+				if err := t.KillSession(sessionID); err != nil {
+					return fmt.Errorf("killing zombie session: %w", err)
+				}
+			}
 		}
 	}
 
@@ -152,22 +179,17 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	// Working directory
 	witnessDir := m.witnessDir()
 
-	// Ensure runtime settings exist in the shared witness parent directory.
-	// Settings are passed to Claude Code via --settings flag.
-	// ResolveRoleAgentConfig is internally serialized (resolveConfigMu in
-	// package config) to prevent concurrent rig starts from corrupting the
-	// global agent registry.
-	townRoot := m.townRoot()
-
 	// Resolve CLAUDE_CONFIG_DIR from accounts.json so witness sessions
 	// use the correct account. Mirrors the daemon restart path (lifecycle.go).
+	// (runtimeConfig and townRoot already resolved above for drift detection.
+	// ResolveRoleAgentConfig is internally serialized in package config to
+	// prevent concurrent rig starts from corrupting the global agent registry.)
 	accountsPath := constants.MayorAccountsPath(townRoot)
 	runtimeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, "")
 	if runtimeConfigDir == "" {
 		runtimeConfigDir = os.Getenv("CLAUDE_CONFIG_DIR")
 	}
 
-	runtimeConfig := config.ResolveRoleAgentConfig("witness", townRoot, m.rig.Path)
 	witnessSettingsDir := config.RoleSettingsDir("witness", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(witnessSettingsDir, witnessDir, "witness", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)

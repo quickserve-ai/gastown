@@ -248,6 +248,21 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		return fmt.Errorf("waiting for refinery to start: %w", err)
 	}
 
+	// Create (or reopen) agent bead so downstream mechanisms (e.g. gt mol step await-event)
+	// can track this refinery's idle cycles and apply exponential backoff. Non-fatal.
+	{
+		bd := beads.New(beads.ResolveBeadsDir(m.rig.BeadsPath()))
+		prefix := beads.GetPrefixForRig(townRoot, m.rig.Name)
+		agentID := beads.RefineryBeadIDWithPrefix(prefix, m.rig.Name)
+		if _, beadErr := bd.CreateOrReopenAgentBead(agentID, agentID, &beads.AgentFields{
+			RoleType:   "refinery",
+			Rig:        m.rig.Name,
+			AgentState: "spawning",
+		}); beadErr != nil {
+			log.Printf("warning: could not create agent bead for refinery %s: %v", m.rig.Name, beadErr)
+		}
+	}
+
 	// Start nudge-queue poller (gt-dgf). Claude's UserPromptSubmit hook only
 	// drains when the agent submits a prompt. Idle agents never submit, so
 	// queued nudges deadlock. The poller breaks the cycle by polling every 10s.

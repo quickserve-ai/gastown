@@ -279,6 +279,21 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		log.Printf("warning: accepting startup dialogs for %s: %v", sessionID, err)
 	}
 
+	// Create (or reopen) agent bead so downstream mechanisms (e.g. gt mol step await-event)
+	// can track this witness's idle cycles and apply exponential backoff. Non-fatal.
+	{
+		bd := beads.New(beads.ResolveBeadsDir(m.rig.BeadsPath()))
+		prefix := beads.GetPrefixForRig(townRoot, m.rig.Name)
+		agentID := beads.WitnessBeadIDWithPrefix(prefix, m.rig.Name)
+		if _, beadErr := bd.CreateOrReopenAgentBead(agentID, agentID, &beads.AgentFields{
+			RoleType:   "witness",
+			Rig:        m.rig.Name,
+			AgentState: "spawning",
+		}); beadErr != nil {
+			log.Printf("warning: could not create agent bead for witness %s: %v", m.rig.Name, beadErr)
+		}
+	}
+
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
 	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
 		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)

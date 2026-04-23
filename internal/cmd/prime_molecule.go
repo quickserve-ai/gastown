@@ -310,7 +310,10 @@ func outputWitnessPatrolContext(ctx RoleContext) {
 	cfg := PatrolConfig{
 		RoleName:        "witness",
 		PatrolMolName:   constants.MolWitnessPatrol,
-		BeadsDir:        ctx.TownRoot,
+		// Rig root (not town root): witness queries its own rig DB via the
+		// redirect chain. TownRoot would land the bead in hq where witness
+		// never looks. See the cross-DB fix that accompanied this change.
+		BeadsDir:        filepath.Join(ctx.TownRoot, ctx.Rig),
 		Assignee:        ctx.Rig + "/witness",
 		HeaderEmoji:     constants.EmojiWitness,
 		HeaderTitle:     "Witness Patrol Status",
@@ -334,7 +337,7 @@ func outputRefineryPatrolContext(ctx RoleContext) {
 	cfg := PatrolConfig{
 		RoleName:        "refinery",
 		PatrolMolName:   constants.MolRefineryPatrol,
-		BeadsDir:        ctx.TownRoot,
+		BeadsDir:        filepath.Join(ctx.TownRoot, ctx.Rig),
 		Assignee:        ctx.Rig + "/refinery",
 		HeaderEmoji:     "🔧",
 		HeaderTitle:     "Refinery Patrol Status",

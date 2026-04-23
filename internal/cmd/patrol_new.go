@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -57,17 +58,21 @@ func runPatrolNew(cmd *cobra.Command, args []string) error {
 			Assignee:      "deacon",
 		}
 	case RoleWitness:
+		// BeadsDir must be the rig root, NOT the town root: witness queries
+		// its own rig's DB via the redirect chain at <rig>/.beads/redirect →
+		// mayor/rig/.beads. Passing TownRoot lands the patrol bead in the
+		// hq DB where witness never looks, leaving it hookless after spawn.
 		cfg = PatrolConfig{
 			RoleName:      "witness",
 			PatrolMolName: constants.MolWitnessPatrol,
-			BeadsDir:      roleInfo.TownRoot,
+			BeadsDir:      filepath.Join(roleInfo.TownRoot, roleInfo.Rig),
 			Assignee:      roleInfo.Rig + "/witness",
 		}
 	case RoleRefinery:
 		cfg = PatrolConfig{
 			RoleName:      "refinery",
 			PatrolMolName: constants.MolRefineryPatrol,
-			BeadsDir:      roleInfo.TownRoot,
+			BeadsDir:      filepath.Join(roleInfo.TownRoot, roleInfo.Rig),
 			Assignee:      roleInfo.Rig + "/refinery",
 			ExtraVars:     buildRefineryPatrolVars(roleInfo),
 		}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -2140,4 +2141,162 @@ func TestBranchPushedToRemote_NoPushURL(t *testing.T) {
 	if unpushed < 1 {
 		t.Errorf("BranchPushedToRemote unpushed = %d, want >= 1", unpushed)
 	}
+}
+
+func TestParseGitHubRepoRef(t *testing.T) {
+	tests := []struct {
+		name      string
+		remoteURL string
+		want      string
+		wantErr   bool
+	}{
+		{
+			name:      "ssh github",
+			remoteURL: "git@github.com:example/repo.git",
+			want:      "example/repo",
+		},
+		{
+			name:      "https github",
+			remoteURL: "https://github.com/example/repo.git",
+			want:      "example/repo",
+		},
+		{
+			name:      "enterprise https",
+			remoteURL: "https://github.internal.example/example/repo.git",
+			want:      "github.internal.example/example/repo",
+		},
+		{
+			name:      "invalid path",
+			remoteURL: "https://github.com/example",
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseGitHubRepoRef(tt.remoteURL)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseGitHubRepoRef(%q) error = nil, want error", tt.remoteURL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGitHubRepoRef(%q) error = %v", tt.remoteURL, err)
+			}
+			if got != tt.want {
+				t.Fatalf("parseGitHubRepoRef(%q) = %q, want %q", tt.remoteURL, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrepareBranchForDeletion_RetargetsDownstreamPRs(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	if _, err := g.AddRemote("origin", "git@github.com:example/repo.git"); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+
+	logPath := installFakeGH(t, `#!/bin/sh
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"pr list --head polecat/stack/base --state open --json number,headRefName,baseRefName --limit 100 --repo example/repo"*)
+    printf '%s\n' '[]'
+    ;;
+  *"pr list --base polecat/stack/base --state open --json number,headRefName,baseRefName --limit 100 --repo example/repo"*)
+    printf '%s\n' '[{"number":23,"headRefName":"polecat/downstream","baseRefName":"polecat/stack/base"}]'
+    ;;
+  *"pr edit 23 --base main --repo example/repo"*)
+    exit 0
+    ;;
+  *)
+    echo "unexpected gh args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	prep, err := g.PrepareBranchForDeletion("polecat/stack/base", "main")
+	if err != nil {
+		t.Fatalf("PrepareBranchForDeletion: %v", err)
+	}
+	if len(prep.OpenHeadPRs) != 0 {
+		t.Fatalf("OpenHeadPRs = %d, want 0", len(prep.OpenHeadPRs))
+	}
+	if len(prep.RetargetedBasePRs) != 1 {
+		t.Fatalf("RetargetedBasePRs = %d, want 1", len(prep.RetargetedBasePRs))
+	}
+	if prep.BaseTarget != "main" {
+		t.Fatalf("BaseTarget = %q, want main", prep.BaseTarget)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read gh log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "--repo example/repo") {
+		t.Fatalf("gh log missing explicit repo context:\n%s", logText)
+	}
+	if !strings.Contains(logText, "pr edit 23 --base main --repo example/repo") {
+		t.Fatalf("gh log missing retarget command:\n%s", logText)
+	}
+}
+
+func TestPrepareBranchForDeletion_SkipsWhenHeadPROpen(t *testing.T) {
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	if _, err := g.AddRemote("origin", "https://github.com/example/repo.git"); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+
+	logPath := installFakeGH(t, `#!/bin/sh
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"pr list --head polecat/stack/base --state open --json number,headRefName,baseRefName --limit 100 --repo example/repo"*)
+    printf '%s\n' '[{"number":17,"headRefName":"polecat/stack/base","baseRefName":"main"}]'
+    ;;
+  *)
+    echo "unexpected gh args: $*" >&2
+    exit 1
+    ;;
+esac
+`)
+
+	prep, err := g.PrepareBranchForDeletion("polecat/stack/base", "main")
+	if err != nil {
+		t.Fatalf("PrepareBranchForDeletion: %v", err)
+	}
+	if len(prep.OpenHeadPRs) != 1 {
+		t.Fatalf("OpenHeadPRs = %d, want 1", len(prep.OpenHeadPRs))
+	}
+	if len(prep.RetargetedBasePRs) != 0 {
+		t.Fatalf("RetargetedBasePRs = %d, want 0", len(prep.RetargetedBasePRs))
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read gh log: %v", err)
+	}
+	logText := string(logData)
+	if strings.Contains(logText, "pr list --base") || strings.Contains(logText, "pr edit ") {
+		t.Fatalf("PrepareBranchForDeletion should stop after open head PR:\n%s", logText)
+	}
+}
+
+func installFakeGH(t *testing.T, script string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(binDir, "gh.log")
+	ghPath := filepath.Join(binDir, "gh")
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh helper uses POSIX shell")
+	}
+	if err := os.WriteFile(ghPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("GH_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
 }

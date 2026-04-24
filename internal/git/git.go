@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -954,19 +955,187 @@ func (g *Git) DeleteRemoteBranch(remote, branch string) error {
 	return err
 }
 
+// PullRequestRef is the minimal PR metadata needed for branch-retarget operations.
+type PullRequestRef struct {
+	Number      int    `json:"number"`
+	HeadRefName string `json:"headRefName"`
+	BaseRefName string `json:"baseRefName"`
+}
+
+// BranchDeletePreparation describes what must happen before a branch can be
+// safely deleted on the remote.
+type BranchDeletePreparation struct {
+	OpenHeadPRs       []PullRequestRef
+	RetargetedBasePRs []PullRequestRef
+	BaseTarget        string
+}
+
+// PrepareBranchForDeletion checks for PRs that would be affected by deleting a
+// branch and retargets downstream PRs before deletion.
+//
+// Safety rules:
+//   - If any open PR still uses the branch as its HEAD, deletion must be skipped.
+//   - If open PRs use the branch as their BASE, they are retargeted to newBase.
+//   - Any GitHub lookup or retarget error is fatal so callers can skip deletion.
+func (g *Git) PrepareBranchForDeletion(branch, newBase string) (*BranchDeletePreparation, error) {
+	branch = strings.TrimSpace(branch)
+	newBase = strings.TrimSpace(newBase)
+
+	prep := &BranchDeletePreparation{}
+	if branch == "" {
+		return prep, nil
+	}
+
+	headPRs, err := g.ListOpenPRsWithHead(branch)
+	if err != nil {
+		return nil, err
+	}
+	prep.OpenHeadPRs = headPRs
+	if len(headPRs) > 0 {
+		return prep, nil
+	}
+
+	downstreamPRs, err := g.ListOpenPRsWithBase(branch)
+	if err != nil {
+		return nil, err
+	}
+	if len(downstreamPRs) == 0 {
+		return prep, nil
+	}
+	if newBase == "" {
+		return nil, fmt.Errorf("downstream PRs use %s as base but no retarget base was provided", branch)
+	}
+
+	prep.BaseTarget = newBase
+	for _, pr := range downstreamPRs {
+		if err := g.RetargetPR(pr.Number, newBase); err != nil {
+			return nil, fmt.Errorf("retarget PR #%d to %s: %w", pr.Number, newBase, err)
+		}
+		pr.BaseRefName = newBase
+		prep.RetargetedBasePRs = append(prep.RetargetedBasePRs, pr)
+	}
+
+	return prep, nil
+}
+
 // HasOpenPR checks whether the given branch has an open pull request on GitHub.
 // Uses the gh CLI to query for open PRs with the branch as head ref.
 // Returns false on any error (fail-open: branch deletion proceeds if gh is unavailable).
 func (g *Git) HasOpenPR(branch string) bool {
-	cmd := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number", "--limit", "1")
-	cmd.Dir = g.workDir
+	prs, err := g.ListOpenPRsWithHead(branch)
+	if err != nil {
+		return false // Preserve legacy fail-open behavior for existing callers.
+	}
+	return len(prs) > 0
+}
+
+// ListOpenPRsWithHead returns open PRs whose head ref matches branch.
+func (g *Git) ListOpenPRsWithHead(branch string) ([]PullRequestRef, error) {
+	return g.listOpenPRs("--head", branch)
+}
+
+// ListOpenPRsWithBase returns open PRs whose base ref matches branch.
+func (g *Git) ListOpenPRsWithBase(branch string) ([]PullRequestRef, error) {
+	return g.listOpenPRs("--base", branch)
+}
+
+// RetargetPR changes an open PR's base branch.
+func (g *Git) RetargetPR(prNumber int, newBase string) error {
+	args := []string{"pr", "edit", fmt.Sprintf("%d", prNumber), "--base", newBase}
+	args, err := g.appendGHRepoArg(args, "origin")
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("gh", args...)
+	if g.workDir != "" {
+		cmd.Dir = g.workDir
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (g *Git) listOpenPRs(selectorFlag, branch string) ([]PullRequestRef, error) {
+	args := []string{"pr", "list", selectorFlag, branch, "--state", "open", "--json", "number,headRefName,baseRefName", "--limit", "100"}
+	args, err := g.appendGHRepoArg(args, "origin")
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("gh", args...)
+	if g.workDir != "" {
+		cmd.Dir = g.workDir
+	}
 	out, err := cmd.Output()
 	if err != nil {
-		return false // fail-open: can't determine PR state, allow deletion
+		return nil, fmt.Errorf("gh %s: %w", strings.Join(args, " "), err)
 	}
-	out = bytes.TrimSpace(out)
-	// Empty array "[]" means no open PRs
-	return len(out) > 2
+
+	var prs []PullRequestRef
+	if err := json.Unmarshal(bytes.TrimSpace(out), &prs); err != nil {
+		return nil, fmt.Errorf("decode gh PR list output: %w", err)
+	}
+	return prs, nil
+}
+
+func (g *Git) appendGHRepoArg(args []string, remote string) ([]string, error) {
+	repoRef, err := g.repoRefForRemote(remote)
+	if err != nil {
+		return nil, err
+	}
+	return append(args, "--repo", repoRef), nil
+}
+
+func (g *Git) repoRefForRemote(remote string) (string, error) {
+	remoteURL, err := g.RemoteURL(remote)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s remote URL: %w", remote, err)
+	}
+	repoRef, err := parseGitHubRepoRef(remoteURL)
+	if err != nil {
+		return "", fmt.Errorf("parse %s remote URL %q: %w", remote, remoteURL, err)
+	}
+	return repoRef, nil
+}
+
+func parseGitHubRepoRef(remoteURL string) (string, error) {
+	remoteURL = strings.TrimSpace(remoteURL)
+	remoteURL = strings.TrimSuffix(remoteURL, ".git")
+	if remoteURL == "" {
+		return "", fmt.Errorf("empty remote URL")
+	}
+
+	if strings.HasPrefix(remoteURL, "git@") {
+		withoutUser := strings.TrimPrefix(remoteURL, "git@")
+		parts := strings.SplitN(withoutUser, ":", 2)
+		if len(parts) != 2 {
+			return "", fmt.Errorf("unsupported SSH remote")
+		}
+		return repoRefFromHostPath(parts[0], parts[1])
+	}
+
+	u, err := url.Parse(remoteURL)
+	if err != nil {
+		return "", err
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	return repoRefFromHostPath(u.Host, strings.TrimPrefix(u.Path, "/"))
+}
+
+func repoRefFromHostPath(host, path string) (string, error) {
+	path = strings.Trim(path, "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("missing owner/repo path")
+	}
+
+	repoPath := strings.Join(parts[:2], "/")
+	if host == "" || host == "github.com" {
+		return repoPath, nil
+	}
+	return host + "/" + repoPath, nil
 }
 
 // FindPRNumber returns the GitHub PR number for the given branch, or 0 if none exists.

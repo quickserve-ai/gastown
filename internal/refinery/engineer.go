@@ -251,7 +251,6 @@ type MRAnomaly struct {
 	Detail   string        `json:"detail"`
 }
 
-
 // errMergeSlotTimeout is returned by acquireMainPushSlot when retries are
 // exhausted due to slot contention. Infrastructure errors (beads down,
 // permission errors) return a different error so callers can distinguish
@@ -270,7 +269,7 @@ type Engineer struct {
 	beads                 *beads.Beads
 	git                   *git.Git
 	config                *MergeQueueConfig
-	prProvider            PRProvider   // VCS-specific PR operations (nil when MergeStrategy != "pr")
+	prProvider            PRProvider // VCS-specific PR operations (nil when MergeStrategy != "pr")
 	workDir               string
 	output                io.Writer    // Output destination for user-facing messages
 	router                *mail.Router // Mail router for sending protocol messages
@@ -350,21 +349,21 @@ func (e *Engineer) LoadConfig() error {
 	// Parse merge_queue section into our config struct
 	// We need special handling for poll_interval (string -> Duration)
 	var mqRaw struct {
-		Enabled              *bool                      `json:"enabled"`
-		OnConflict           *string                    `json:"on_conflict"`
-		RunTests             *bool                      `json:"run_tests"`
-		TestCommand          *string                    `json:"test_command"`
-		DeleteMergedBranches *bool                      `json:"delete_merged_branches"`
-		RetryFlakyTests      *int                       `json:"retry_flaky_tests"`
-		PollInterval         *string                    `json:"poll_interval"`
-		MaxConcurrent        *int                       `json:"max_concurrent"`
-		StaleClaimTimeout    *string                    `json:"stale_claim_timeout"`
-		Gates                map[string]*gateConfigRaw  `json:"gates"`
-		GatesParallel        *bool                      `json:"gates_parallel"`
-		AutoPush             *bool                      `json:"auto_push"`
-		MergeStrategy        *string                    `json:"merge_strategy"`
-		VCSProvider          *string                    `json:"vcs_provider"`
-		RequireReview        *bool                      `json:"require_review"`
+		Enabled              *bool                     `json:"enabled"`
+		OnConflict           *string                   `json:"on_conflict"`
+		RunTests             *bool                     `json:"run_tests"`
+		TestCommand          *string                   `json:"test_command"`
+		DeleteMergedBranches *bool                     `json:"delete_merged_branches"`
+		RetryFlakyTests      *int                      `json:"retry_flaky_tests"`
+		PollInterval         *string                   `json:"poll_interval"`
+		MaxConcurrent        *int                      `json:"max_concurrent"`
+		StaleClaimTimeout    *string                   `json:"stale_claim_timeout"`
+		Gates                map[string]*gateConfigRaw `json:"gates"`
+		GatesParallel        *bool                     `json:"gates_parallel"`
+		AutoPush             *bool                     `json:"auto_push"`
+		MergeStrategy        *string                   `json:"merge_strategy"`
+		VCSProvider          *string                   `json:"vcs_provider"`
+		RequireReview        *bool                     `json:"require_review"`
 	}
 
 	if err := json.Unmarshal(rawConfig.MergeQueue, &mqRaw); err != nil {
@@ -853,7 +852,6 @@ func (e *Engineer) doMergePR(ctx context.Context, branch, target string) Process
 	}
 }
 
-
 func (e *Engineer) acquireMainPushSlot(ctx context.Context) (string, error) {
 	slotID, err := e.mergeSlotEnsureExists()
 	if err != nil {
@@ -1264,12 +1262,24 @@ func (e *Engineer) HandleMRInfoSuccess(mr *MRInfo, result ProcessResult) {
 		// be closed via gh pr merge (showing "merged"), not via branch deletion
 		// (which shows "closed" and destroys the PR audit trail).
 		if isPolecat {
-			if e.git.HasOpenPR(mr.Branch) {
+			retargetBase := strings.TrimSpace(mr.Target)
+			if retargetBase == "" {
+				retargetBase = e.rig.DefaultBranch()
+			}
+			prep, prepErr := e.git.PrepareBranchForDeletion(mr.Branch, retargetBase)
+			if prepErr != nil {
+				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: skipping remote branch delete for %s: %v\n", mr.Branch, prepErr)
+			} else if len(prep.OpenHeadPRs) > 0 {
 				_, _ = fmt.Fprintf(e.output, "[Engineer] Skipping remote branch delete for %s: open PR exists (gas-fk4)\n", mr.Branch)
-			} else if err := e.git.DeleteRemoteBranch("origin", mr.Branch); err != nil {
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to delete remote branch %s: %v\n", mr.Branch, err)
 			} else {
-				_, _ = fmt.Fprintf(e.output, "[Engineer] Deleted remote branch: %s\n", mr.Branch)
+				for _, pr := range prep.RetargetedBasePRs {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Retargeted downstream PR #%d to %s\n", pr.Number, prep.BaseTarget)
+				}
+				if err := e.git.DeleteRemoteBranch("origin", mr.Branch); err != nil {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Warning: failed to delete remote branch %s: %v\n", mr.Branch, err)
+				} else {
+					_, _ = fmt.Fprintf(e.output, "[Engineer] Deleted remote branch: %s\n", mr.Branch)
+				}
 			}
 		}
 	}

@@ -76,6 +76,21 @@ func TestInstallForRole_RoleAgnostic(t *testing.T) {
 	}
 }
 
+func TestOMPHookTemplateLoadsClaudeLocalPersona(t *testing.T) {
+	content, err := resolveAndSubstitute("omp", "gastown-hook.ts", "crew")
+	if err != nil {
+		t.Fatalf("resolveAndSubstitute: %v", err)
+	}
+
+	text := string(content)
+	if !strings.Contains(text, `CLAUDE.local.md`) {
+		t.Fatal("omp hook template should reference CLAUDE.local.md persona overlay")
+	}
+	if !strings.Contains(text, `persona + "\n\n---\n\n" + primeContext`) {
+		t.Fatal("omp hook template should prepend persona overlay to gt prime context")
+	}
+}
+
 func TestInstallForRole_SkipsExisting(t *testing.T) {
 	dir := t.TempDir()
 	hooksPath := filepath.Join(dir, ".claude", "settings.json")

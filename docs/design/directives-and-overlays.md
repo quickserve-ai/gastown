@@ -255,6 +255,99 @@ overlay's `step_id` becomes stale. On next `gt doctor` run:
 Running `gt doctor --fix` removes the stale override. The operator then
 creates a new override targeting `post-results`.
 
+## Relationship to CLAUDE.md
+
+Directives and overlays live **alongside — not inside** — the Claude Code
+`CLAUDE.md` hierarchy. They are complementary channels with different loading
+mechanisms, different context-lifetime characteristics, and different intended
+uses. Understanding both is critical for picking the right tool and avoiding
+overlap.
+
+### Representation in the agent's context
+
+| | `CLAUDE.md` / `CLAUDE.local.md` | Directives |
+|---|---|---|
+| Loaded by | Claude Code harness | `gt prime` (this Go code) |
+| Delivery | `<system-reminder>` block pinned by harness | stdout of `gt prime` → normal tool result in conversation |
+| Scope | Filesystem path (hierarchical cwd walk: global → project → subdir → `.local.md`) | Role + rig (identity) |
+| Refresh | Read once at session start, then cached | Re-read from disk on every `gt prime` |
+| Persistence | Pinned — survives compaction, effectively always present | One-shot tool output — ages in context like any message |
+
+### Precedence
+
+There is no harness-enforced arbiter — both are ultimately text the model
+reads. In practice:
+
+1. **`CLAUDE.md` wins on stickiness.** The `<system-reminder>` wrapper is
+   weighted heavily by the model, and the harness reconstructs it rather than
+   summarizing it.
+2. **Directives have explicit semantic authority over formulas,** stated at
+   injection as "operator policy — overrides formula where they conflict."
+   That targets formula/molecule defaults, **not** `CLAUDE.md`.
+3. **User instructions always win over both,** per the standard instruction
+   priority (user → skills/directives → defaults).
+
+If a `CLAUDE.md` and a directive genuinely contradict, that is a config
+mistake — they should not be carrying the same kind of rule. Split by intent:
+
+- `CLAUDE.md`: stable identity, voice, repo conventions ("this is who I am,
+  how this repo works")
+- Directive: time-bound, role-scoped operator policy ("this sprint, all
+  witnesses do X")
+
+### Context rot
+
+Directives are **substantially more rot-prone** than `CLAUDE.md`. By turn
+50–100 of a long session, a directive emitted by `gt prime` at turn 1 is deep
+in the transcript, eligible for compaction, and may be summarized to "ran gt
+prime" with the directive text dropped entirely. `CLAUDE.md` is pinned in
+system context and does not age relative to the cursor.
+
+**Practical implication:**
+
+- For durable behavior on a single long-lived agent → `CLAUDE.md` (or bake
+  the instruction into the formula/molecule so it re-emits each time the
+  step runs, or `bd remember` so the agent queries it explicitly).
+- For fleet-wide, role-specific, operator-changeable policy that tolerates
+  re-prime cadence → directives. Best when the agent primes frequently
+  (after each handoff / clear / compact).
+- For surgical per-step modifications → overlays (these also re-apply on
+  every `gt prime`, and their text travels with the formula).
+
+### Non-Claude runtimes (caveat)
+
+Both the `<system-reminder>` injection (for `CLAUDE.md`) and the `gt prime`
+stdout channel (for directives) assume a Claude Code harness. Non-Claude
+runtimes have different characteristics:
+
+- **Codex:** `SupportsHooks: false`, `PromptMode: "none"` in
+  `internal/config/agents.go` — prime hook output is discarded. Only the
+  instructions file (`AGENTS.override.md` → native, `AGENTS.md` → checked in)
+  reaches the agent. Directives do **not** currently reach Codex crew.
+- **Gemini:** reads `GEMINI.md` / `GEMINI.local.md` (via
+  `contextFileName` config). Hook-based prime output only reaches it if the
+  runtime forwards it.
+- **OMP / Pi:** hook-based, injection happens inside the runtime-specific
+  hook (`internal/hooks/templates/omp/*.ts`). Whatever the hook prepends is
+  what the agent sees.
+- **Cursor / Auggie / Amp / OpenCode / Copilot:** see `agents.go` for each
+  runtime's instruction file and prompt mode. Persona overlay story is
+  covered in the bridge doc on per-runtime persona overlays.
+
+Until those channels are wired, directives are effectively a
+Claude-Code-only operator lever. For cross-runtime operator policy, put it
+in the instructions file the runtime natively reads.
+
+### Decision guide: where does this instruction belong?
+
+| Need | Right surface |
+|------|---------------|
+| "I am Woodhouse, I speak this way, this repo builds like this" | `CLAUDE.local.md` (per crew) or project `CLAUDE.md` (per repo) |
+| "All polecats right now: report findings to the conversation, don't post to GitHub" | Directive (`gt directive edit polecat`) |
+| "In `mol-polecat-work`, the `submit-review` step should do X instead of Y" | Formula overlay |
+| "Cross-town shared pattern for humans to read" | `~/gt/bridge/docs/best-practices/` (reference, not auto-loaded) |
+| "This specific fact the agent should recall during work" | `bd remember` |
+
 ## Design Rationale
 
 ### Why Two Levels, Not One?

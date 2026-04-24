@@ -18,6 +18,20 @@ export default function (pi) {
   let primeContext = null;
   let contextInjected = false;
 
+  async function loadPersonaOverlay() {
+    try {
+      const personaResult = await pi.exec("cat", ["CLAUDE.local.md"]);
+      if (personaResult.code === 0 && personaResult.stdout?.trim()) {
+        const persona = personaResult.stdout.trim();
+        console.error("[gastown] persona loaded from CLAUDE.local.md (" + persona.length + " chars)");
+        return persona;
+      }
+    } catch (e) {
+      console.error("[gastown] CLAUDE.local.md load skipped:", e.message);
+    }
+    return null;
+  }
+
   // SessionStart — run gt prime and capture context for injection.
   pi.on("session_start", async (event, ctx) => {
     try {
@@ -30,6 +44,13 @@ export default function (pi) {
       }
     } catch (e) {
       console.error("[gastown] gt prime failed:", e.message);
+    }
+
+    const persona = await loadPersonaOverlay();
+    if (persona) {
+      primeContext = primeContext
+        ? persona + "\n\n---\n\n" + primeContext
+        : persona;
     }
 
     // Check mail for autonomous roles.
@@ -74,6 +95,10 @@ export default function (pi) {
       const result = await pi.exec("gt", ["prime", "--hook"]);
       if (result.code === 0 && result.stdout?.trim()) {
         primeContext = result.stdout.trim();
+        const persona = await loadPersonaOverlay();
+        if (persona) {
+          primeContext = persona + "\n\n---\n\n" + primeContext;
+        }
         console.error("[gastown] prime context refreshed after compaction");
       }
     } catch (e) {

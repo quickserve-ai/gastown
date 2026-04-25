@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // Heartbeat age thresholds — these are compiled-in defaults.
@@ -79,7 +81,48 @@ func WriteHeartbeat(townRoot string, hb *Heartbeat) error {
 	legacyFile := filepath.Join(filepath.Dir(hbFile), ".deacon-heartbeat")
 	_ = os.WriteFile(legacyFile, []byte(""), 0644) //nolint:gosec // G306: world-readable liveness file is intentional
 
+	// Dual-write a polecat-compatible heartbeat to .runtime/heartbeats/hq-deacon.json.
+	// Schema mirrors polecat.SessionHeartbeat (state/context/bead) so observability
+	// tooling that reads the unified .runtime/heartbeats path sees fresh data for the
+	// deacon. The legacy path above remains canonical for plugins that haven't
+	// migrated. Best-effort: write failures are silently ignored.
+	writeSessionHeartbeat(townRoot, hb)
+
 	return nil
+}
+
+// writeSessionHeartbeat writes a polecat-compatible heartbeat at
+// $townRoot/.runtime/heartbeats/hq-deacon.json. The schema matches
+// polecat.SessionHeartbeat — kept duplicated here to avoid importing polecat
+// (heavy transitive deps) for one write. Errors are silently ignored.
+func writeSessionHeartbeat(townRoot string, hb *Heartbeat) {
+	dir := filepath.Join(townRoot, ".runtime", "heartbeats")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+
+	// Mirrors polecat.SessionHeartbeat / polecat.HeartbeatWorking. The deacon's
+	// legacy heartbeat path doesn't carry agent-reported state, so this writer
+	// always reports "working" — the deacon would call gt heartbeat --state=stuck
+	// directly via the polecat path if it needed to self-report stuck.
+	payload := struct {
+		Timestamp time.Time `json:"timestamp"`
+		State     string    `json:"state,omitempty"`
+		Context   string    `json:"context,omitempty"`
+		Bead      string    `json:"bead,omitempty"`
+	}{
+		Timestamp: hb.Timestamp,
+		State:     "working",
+		Context:   hb.LastAction,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	path := filepath.Join(dir, session.DeaconSessionName()+".json")
+	_ = os.WriteFile(path, data, 0644) //nolint:gosec // G306: liveness file matching polecat convention
 }
 
 // ReadHeartbeat reads the Deacon heartbeat from disk.

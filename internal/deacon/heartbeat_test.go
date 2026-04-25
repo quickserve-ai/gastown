@@ -1,6 +1,7 @@
 package deacon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -346,6 +347,50 @@ func TestWriteHeartbeat_TouchesLegacyFile(t *testing.T) {
 	}
 	if time.Since(info.ModTime()) > time.Minute {
 		t.Error(".deacon-heartbeat mtime should be recent")
+	}
+}
+
+func TestWriteHeartbeat_DualWritesPolecatPath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "deacon-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	hb := &Heartbeat{Cycle: 1, LastAction: "patrol-complete"}
+	if err := WriteHeartbeat(tmpDir, hb); err != nil {
+		t.Fatalf("WriteHeartbeat error: %v", err)
+	}
+
+	// Polecat-compatible heartbeat at $townRoot/.runtime/heartbeats/hq-deacon.json
+	// is the unified path observability tooling reads.
+	polecatPath := filepath.Join(tmpDir, ".runtime", "heartbeats", "hq-deacon.json")
+	data, err := os.ReadFile(polecatPath)
+	if err != nil {
+		t.Fatalf("polecat-style heartbeat not created at %s: %v", polecatPath, err)
+	}
+
+	var payload struct {
+		Timestamp time.Time `json:"timestamp"`
+		State     string    `json:"state"`
+		Context   string    `json:"context"`
+		Bead      string    `json:"bead"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("polecat heartbeat is not valid JSON: %v", err)
+	}
+
+	if payload.State != "working" {
+		t.Errorf("State = %q, want %q", payload.State, "working")
+	}
+	if payload.Context != "patrol-complete" {
+		t.Errorf("Context = %q, want %q", payload.Context, "patrol-complete")
+	}
+	if payload.Timestamp.IsZero() {
+		t.Error("Timestamp should be set")
+	}
+	if time.Since(payload.Timestamp) > time.Minute {
+		t.Error("Timestamp should be recent")
 	}
 }
 

@@ -304,13 +304,20 @@ passes the agent's resume flag (e.g., Claude's --resume) so the session
 picks up where it left off, with proper Gas Town metadata set so GC doesn't
 kill the session.
 
+Per-crew agent / model selection: --agent flag overrides for one start;
+for persistent assignment, edit "worker_agents" in <rig>/settings/config.json
+(e.g., {"slater": "omp-gemini-flash"}). Custom aliases like "omp-gemini-flash"
+are defined via 'gt config agent set' (see 'gt config agent set --help').
+Resolution: --agent flag > rig worker_agents > town crew_agents > role_agents > defaults.
+
 Examples:
   gt crew start beads             # Start all crew in beads rig
   gt crew start                   # Start all crew (rig inferred from cwd)
   gt crew start beads grip fang   # Start specific crew in beads rig
   gt crew start gastown joe       # Start joe in gastown rig
   gt crew start beads ace --resume          # Resume ace's most recent session
-  gt crew start beads ace --resume abc123   # Resume specific session ID`,
+  gt crew start beads ace --resume abc123   # Resume specific session ID
+  gt crew start gastown slater --agent omp-gemini-flash   # one-shot agent override`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		// With --all, we can have 0 args (infer rig) or 1+ args (rig specified)
 		if crewAll {

@@ -78,6 +78,17 @@ matches a known preset (e.g., "gemini", "claude"). Use --provider to
 set it explicitly for custom binary names. The provider controls
 session handling, tmux detection, hooks, and other runtime defaults.
 
+To pin a specific crew member to a custom agent+model, define a custom
+alias here, then assign it in the rig's settings.json under "worker_agents":
+
+  gt config agent set omp-gemini-flash \"omp --hook .omp/hooks/gastown-hook.ts --model google-antigravity/gemini-3-flash\" --provider omp
+  # then edit <rig>/settings/config.json:
+  #   \"worker_agents\": { \"slater\": \"omp-gemini-flash\" }
+  gt crew restart slater
+
+Resolution chain: --agent flag > rig worker_agents > town crew_agents
+> role_agents > defaults.
+
 Examples:
   gt config agent set claude-glm \"claude-glm --model glm-4\"
   gt config agent set gemini-custom gemini --approval-mode yolo

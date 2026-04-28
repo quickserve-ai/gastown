@@ -5,6 +5,9 @@ on:
     - cron: '0 6 * * *' # 06:00 UTC daily
   workflow_dispatch: # Allow manual triggering
 
+permissions:
+  contents: read
+
 jobs:
   integration-full:
     name: Full Integration Tests
@@ -44,7 +47,7 @@ jobs:
         run: docker pull dolthub/dolt-sql-server:1.83.0
 
       - name: Add to PATH
-        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Configure Dolt
         run: |

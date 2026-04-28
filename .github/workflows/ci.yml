@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   # Guard: go.mod must not contain replace directives — they break `go install`.
   # See: https://github.com/steveyegge/gastown/issues/2230
@@ -183,10 +186,10 @@ jobs:
       - name: Build gt
         run: |
           make build
-          cp gt $(go env GOPATH)/bin/
+          cp gt "$(go env GOPATH)/bin/"
 
       - name: Add to PATH
-        run: echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Integration Tests
         run: gotestsum --format testname --junitfile junit-integration.xml -- -tags=integration -timeout=15m -v ./internal/cmd/...

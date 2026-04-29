@@ -627,7 +627,7 @@ func normalizeHookShowTarget(target string) string {
 // environments where the global session registry is not initialized.
 func sessionNameToCanonicalAddress(sessionName, targetHint string) (string, bool) {
 	if identity, err := session.ParseSessionName(sessionName); err == nil {
-		return identity.Address(), true
+		return canonicalAssigneeAddress(identity), true
 	}
 
 	registry := session.NewPrefixRegistry()
@@ -644,7 +644,7 @@ func sessionNameToCanonicalAddress(sessionName, targetHint string) (string, bool
 	if err != nil {
 		return "", false
 	}
-	return identity.Address(), true
+	return canonicalAssigneeAddress(identity), true
 }
 
 // findTownRoot finds the Gas Town root directory.

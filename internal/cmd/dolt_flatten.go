@@ -16,7 +16,8 @@ import (
 )
 
 var (
-	doltFlattenConfirm bool
+	doltFlattenConfirm                bool
+	doltFlattenForceFederationBreak   bool
 )
 
 var doltFlattenCmd = &cobra.Command{
@@ -35,7 +36,12 @@ Safety protocol:
   3. Commits all data as single commit
   4. Verifies row counts match (integrity check)
 
-Requires --yes-i-am-sure flag as safety interlock.`,
+Requires --yes-i-am-sure flag as safety interlock.
+
+FEDERATION GUARDRAIL: If the database has a configured remote (origin),
+flattening locally rewrites history that downstream peers expect to be
+stable. The command will refuse unless --force-federation-break is also
+passed. Recovery for peers requires a hard reset to the new origin.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDoltFlatten,
 }
@@ -43,6 +49,8 @@ Requires --yes-i-am-sure flag as safety interlock.`,
 func init() {
 	doltFlattenCmd.Flags().BoolVar(&doltFlattenConfirm, "yes-i-am-sure", false,
 		"Required safety flag to confirm you want to destroy history")
+	doltFlattenCmd.Flags().BoolVar(&doltFlattenForceFederationBreak, "force-federation-break", false,
+		"Allow flatten on a federated database (rewrites history; peers must reset)")
 	doltCmd.AddCommand(doltFlattenCmd)
 }
 
@@ -80,6 +88,21 @@ func runDoltFlatten(cmd *cobra.Command, args []string) error {
 	var dummy int
 	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&dummy); err != nil {
 		return fmt.Errorf("database %q not reachable: %w", dbName, err)
+	}
+
+	// Federation guardrail: refuse to flatten federated databases without explicit
+	// opt-in. Flattening rewrites history; peers expect history to be stable.
+	federated, fedErr := maintainIsFederated(config, dbName)
+	if fedErr != nil {
+		return fmt.Errorf("federation check failed for %s: %w (refusing to flatten — pass --force-federation-break only if you've manually verified no remote is configured)", dbName, fedErr)
+	}
+	if federated && !doltFlattenForceFederationBreak {
+		return fmt.Errorf("%s is federated (has a configured remote). Flattening would rewrite history that downstream peers expect to be stable, and may also chunk-loss preventing future pushes. Pass --force-federation-break only if you've coordinated with peers and accept that they must hard-reset to recover", dbName)
+	}
+	if federated {
+		fmt.Printf("%s %s is federated — proceeding under --force-federation-break\n",
+			style.Warning.Render("⚠"), dbName)
+		fmt.Printf("  Downstream peers will need to hard-reset to the new origin to recover.\n")
 	}
 
 	// Pre-flight: check backup freshness.

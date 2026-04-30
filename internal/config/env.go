@@ -191,6 +191,20 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// See: https://github.com/steveyegge/beads/issues/2241
 	env["BD_BACKUP_ENABLED"] = "false"
 
+	// Pin SSH_AUTH_SOCK to 1Password's stable agent socket for all agent sessions
+	// when present. macOS launchd's ssh-agent socket has a randomized path that
+	// changes on agent recreation (sleep wake, security software restart), leaving
+	// long-lived tmux sessions pointing at stale sockets and breaking git/dolt push.
+	// 1Password's socket path is stable as long as 1Password runs. If 1Password is
+	// not installed, leave SSH_AUTH_SOCK alone — the user's SSH config falls through
+	// to UseKeychain + IdentityFile, which works without an agent on macOS.
+	if home, err := os.UserHomeDir(); err == nil {
+		opSocket := filepath.Join(home, "Library", "Group Containers", "2BUA8C4S2C.com.1password", "t", "agent.sock")
+		if _, err := os.Stat(opSocket); err == nil {
+			env["SSH_AUTH_SOCK"] = opSocket
+		}
+	}
+
 	// Clear NODE_OPTIONS to prevent debugger flags (e.g., --inspect from VSCode)
 	// from being inherited through tmux into Claude's Node.js runtime.
 	// This is the PRIMARY guard: setting it here (the single source of truth

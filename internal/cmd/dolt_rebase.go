@@ -16,9 +16,10 @@ import (
 )
 
 var (
-	doltRebaseConfirm    bool
-	doltRebaseKeepRecent int
-	doltRebaseDryRun     bool
+	doltRebaseConfirm                 bool
+	doltRebaseKeepRecent              int
+	doltRebaseDryRun                  bool
+	doltRebaseForceFederationBreak    bool
 )
 
 var doltRebaseCmd = &cobra.Command{
@@ -48,7 +49,12 @@ Flatten mode (gt dolt flatten) is safe with concurrent writes.
 Use --keep-recent to control how many recent commits to preserve.
 Use --dry-run to see the plan without executing it.
 
-Requires --yes-i-am-sure flag as safety interlock.`,
+Requires --yes-i-am-sure flag as safety interlock.
+
+FEDERATION GUARDRAIL: If the database has a configured remote, surgical
+rebase still rewrites the squashed portion of history that peers expect
+to be stable. The command will refuse unless --force-federation-break is
+also passed. Recovery for peers requires a hard reset to the new origin.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDoltRebase,
 }
@@ -60,6 +66,8 @@ func init() {
 		"Number of recent commits to keep as individual picks")
 	doltRebaseCmd.Flags().BoolVar(&doltRebaseDryRun, "dry-run", false,
 		"Show the rebase plan without executing it")
+	doltRebaseCmd.Flags().BoolVar(&doltRebaseForceFederationBreak, "force-federation-break", false,
+		"Allow rebase on a federated database (rewrites history; peers must reset)")
 	doltCmd.AddCommand(doltRebaseCmd)
 }
 
@@ -101,6 +109,24 @@ func runDoltRebase(cmd *cobra.Command, args []string) error {
 	var dummy int
 	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&dummy); err != nil {
 		return fmt.Errorf("database %q not reachable: %w", dbName, err)
+	}
+
+	// Federation guardrail: refuse to rebase federated databases without explicit
+	// opt-in. Surgical rebase still rewrites the squashed portion; peers expect
+	// history to be stable. Dry-run is exempt — it only previews.
+	if !doltRebaseDryRun {
+		federated, fedErr := maintainIsFederated(config, dbName)
+		if fedErr != nil {
+			return fmt.Errorf("federation check failed for %s: %w (refusing to rebase — pass --force-federation-break only if you've manually verified no remote is configured)", dbName, fedErr)
+		}
+		if federated && !doltRebaseForceFederationBreak {
+			return fmt.Errorf("%s is federated (has a configured remote). Surgical rebase still rewrites the squashed portion of history that downstream peers expect to be stable. Pass --force-federation-break only if you've coordinated with peers and accept that they must hard-reset to recover", dbName)
+		}
+		if federated {
+			fmt.Printf("%s %s is federated — proceeding under --force-federation-break\n",
+				style.Warning.Render("⚠"), dbName)
+			fmt.Printf("  Downstream peers will need to hard-reset to the new origin to recover.\n")
+		}
 	}
 
 	fmt.Printf("%s Pre-flight checks for %s (surgical rebase)\n", style.Bold.Render("●"), style.Bold.Render(dbName))

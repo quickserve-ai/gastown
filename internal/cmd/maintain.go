@@ -30,9 +30,10 @@ const (
 )
 
 var (
-	maintainForce     bool
-	maintainDryRun    bool
-	maintainThreshold int
+	maintainForce                 bool
+	maintainDryRun                bool
+	maintainThreshold             int
+	maintainForceFederationBreak  bool
 )
 
 var maintainCmd = &cobra.Command{
@@ -52,6 +53,13 @@ This encapsulates the maintenance procedure:
 Use --force for non-interactive mode (daemon/cron), or run interactively
 to review the plan before proceeding.
 
+FEDERATION GUARDRAIL: Databases with a configured remote (origin) are
+"federated" — flattening locally rewrites history that downstream peers
+expect to be stable. By default, federated databases are SKIPPED from
+the flatten phase. Pass --force-federation-break to flatten federated
+databases anyway (this rewrites history and may chunk-loss; downstream
+peers must reset to recover).
+
 Examples:
   gt maintain                # Interactive (shows plan, asks confirmation)
   gt maintain --force        # Non-interactive (daemon/cron use)
@@ -64,6 +72,8 @@ func init() {
 	maintainCmd.Flags().BoolVar(&maintainForce, "force", false, "Non-interactive mode (skip confirmation)")
 	maintainCmd.Flags().BoolVar(&maintainDryRun, "dry-run", false, "Preview without making changes")
 	maintainCmd.Flags().IntVar(&maintainThreshold, "threshold", defaultMaintainThreshold, "Commit count threshold for flatten")
+	maintainCmd.Flags().BoolVar(&maintainForceFederationBreak, "force-federation-break", false,
+		"Allow flatten on federated databases (rewrites history; peers must reset)")
 	rootCmd.AddCommand(maintainCmd)
 }
 
@@ -72,6 +82,7 @@ type maintainDBInfo struct {
 	name        string
 	commitCount int
 	hasBackup   bool
+	federated   bool // has a configured remote — flatten would diverge from peers
 }
 
 func runMaintain(cmd *cobra.Command, args []string) error {
@@ -110,18 +121,48 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 			info.commitCount = count
 		}
 		info.hasBackup = maintainHasBackup(config.DataDir, dbName)
+		if fed, err := maintainIsFederated(config, dbName); err == nil {
+			info.federated = fed
+		} else {
+			fmt.Printf("  %s %s: federation check failed: %v (treating as federated for safety)\n",
+				style.Warning.Render("!"), dbName, err)
+			info.federated = true
+		}
 		dbInfos = append(dbInfos, info)
 	}
 
 	// Display plan.
+	// A database is flattened if it crosses the commit threshold AND either is
+	// non-federated or the operator opted into --force-federation-break.
+	plannedFlatten := func(db maintainDBInfo) bool {
+		if db.commitCount < maintainThreshold {
+			return false
+		}
+		if db.federated && !maintainForceFederationBreak {
+			return false
+		}
+		return true
+	}
+
 	flattenCount := 0
 	backupCount := 0
+	skippedFederatedCount := 0
 	fmt.Printf("\n%s Maintenance plan:\n", style.Bold.Render("●"))
 	for _, db := range dbInfos {
 		tags := ""
-		if db.commitCount >= maintainThreshold {
-			tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"))
+		if plannedFlatten(db) {
+			if db.federated {
+				tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten (federation break!)"))
+			} else {
+				tags += fmt.Sprintf(" %s", style.Warning.Render("→ flatten"))
+			}
 			flattenCount++
+		} else if db.commitCount >= maintainThreshold && db.federated {
+			tags += fmt.Sprintf(" %s", style.Dim.Render("→ flatten skipped (federated)"))
+			skippedFederatedCount++
+		}
+		if db.federated {
+			tags += fmt.Sprintf(" %s", style.Dim.Render("[federated]"))
 		}
 		if db.hasBackup {
 			tags += fmt.Sprintf(" %s", style.Dim.Render("[backup]"))
@@ -132,6 +173,10 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n  Databases: %d\n", len(dbInfos))
 	fmt.Printf("  Will backup: %d\n", backupCount)
 	fmt.Printf("  Will flatten: %d (threshold: %d commits)\n", flattenCount, maintainThreshold)
+	if skippedFederatedCount > 0 {
+		fmt.Printf("  Skipped (federated): %d  %s\n", skippedFederatedCount,
+			style.Dim.Render("— pass --force-federation-break to override"))
+	}
 	fmt.Printf("  Will gc: %d\n", len(dbInfos))
 
 	if maintainDryRun {
@@ -192,8 +237,17 @@ func runMaintain(cmd *cobra.Command, args []string) error {
 	if flattenCount > 0 {
 		fmt.Printf("\n%s Flattening databases...\n", style.Bold.Render("●"))
 		for _, db := range dbInfos {
-			if db.commitCount < maintainThreshold {
+			if !plannedFlatten(db) {
+				if db.commitCount >= maintainThreshold && db.federated && !maintainForceFederationBreak {
+					fmt.Printf("  %s %s: skipped (federated; pass --force-federation-break to flatten)\n",
+						style.Dim.Render("○"), db.name)
+				}
 				continue
+			}
+			if db.federated {
+				fmt.Printf("  %s %s: FEDERATION BREAK — flattening federated database\n",
+					style.Warning.Render("⚠"), db.name)
+				fmt.Printf("    Downstream peers will need to reset to recover.\n")
 			}
 			preCount := db.commitCount
 			if err := maintainFlattenDB(config, db.name); err != nil {
@@ -381,4 +435,29 @@ func maintainGCDatabase(config *doltserver.Config, dbName string) error {
 		return fmt.Errorf("dolt_gc: %w", err)
 	}
 	return nil
+}
+
+// maintainIsFederated returns true if the database has any remote configured.
+// A federated DB is one where local history-rewrite operations (flatten, rebase)
+// would diverge from origin and break peers downstream.
+//
+// Detection is via dolt_remotes (presence of any remote, regardless of name —
+// the convention is "origin" but the guardrail trips on any remote since any
+// remote means at least one peer expects history to be stable).
+func maintainIsFederated(config *doltserver.Config, dbName string) (bool, error) {
+	db, err := maintainOpenDB(config, dbName)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), maintainQueryTimeout)
+	defer cancel()
+
+	var count int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`.dolt_remotes", dbName)
+	if err := db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return false, fmt.Errorf("checking dolt_remotes for %s: %w", dbName, err)
+	}
+	return count > 0, nil
 }

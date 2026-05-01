@@ -109,8 +109,9 @@ const (
 	DefaultWitnessStartupStallThreshold  = 90 * time.Second
 	DefaultWitnessStartupActivityGrace   = 60 * time.Second
 	DefaultWitnessMaxBeadRespawns        = 3
-	DefaultWitnessDoneIntentStuckTimeout = 60 * time.Second
-	DefaultWitnessDoneIntentRecentGrace  = 30 * time.Second
+	DefaultWitnessDoneIntentStuckTimeout    = 60 * time.Second
+	DefaultWitnessDoneIntentRecentGrace     = 30 * time.Second
+	DefaultWitnessDoneIntentStaleLiveTimeout = 30 * time.Minute
 )
 
 // LoadOperationalConfig loads operational config from a town root.
@@ -731,4 +732,13 @@ func (wt *WitnessThresholds) DoneIntentRecentGraceD() time.Duration {
 		return ParseDurationOrDefault(wt.DoneIntentRecentGrace, DefaultWitnessDoneIntentRecentGrace)
 	}
 	return DefaultWitnessDoneIntentRecentGrace
+}
+
+// DoneIntentStaleLiveTimeoutD returns the configured or default done-intent stale-live timeout.
+// A live idle polecat with a done-intent label older than this is flagged for review (gt-dhm).
+func (wt *WitnessThresholds) DoneIntentStaleLiveTimeoutD() time.Duration {
+	if wt != nil {
+		return ParseDurationOrDefault(wt.DoneIntentStaleLiveTimeout, DefaultWitnessDoneIntentStaleLiveTimeout)
+	}
+	return DefaultWitnessDoneIntentStaleLiveTimeout
 }

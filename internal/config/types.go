@@ -493,6 +493,13 @@ type WitnessThresholds struct {
 	// DoneIntentRecentGrace is how recently a done-intent must have been created
 	// to be considered still in progress (default "30s").
 	DoneIntentRecentGrace string `json:"done_intent_recent_grace,omitempty"`
+
+	// DoneIntentStaleLiveTimeout is how long a done-intent label can remain on a
+	// live idle polecat before it is flagged for review (default "30m").
+	// A polecat that has a done-intent set but went idle without completing gt done
+	// may be stuck (gt-dhm). The witness exposes this as a zombie for the patrol
+	// formula step to reason about — no automatic action is taken.
+	DoneIntentStaleLiveTimeout string `json:"done_intent_stale_live_timeout,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

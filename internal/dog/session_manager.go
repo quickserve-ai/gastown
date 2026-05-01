@@ -2,6 +2,7 @@
 package dog
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -96,6 +97,15 @@ func (m *SessionManager) Start(dogName string, opts SessionStartOptions) error {
 	}
 
 	sessionID := m.SessionName(dogName)
+
+	// Ensure kennel-level settings exist to prevent dogs from inheriting the
+	// deacon's .claude/settings.json via directory hierarchy. Without this,
+	// dogs pick up the deacon's PreToolUse guard hooks (blocking git checkout
+	// -b, gh pr create, etc.) and lack explicit plugin-acceptance entries,
+	// causing Claude Code's plugin acceptance dialogs (gt-tt1).
+	if err := ensureKennelSettings(kennelDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not provision dog settings for %s: %v\n", dogName, err)
+	}
 
 	// Kill any existing zombie session (tmux alive but agent dead).
 	_, err := session.KillExistingSession(m.tmux, sessionID, true)
@@ -263,6 +273,55 @@ func (m *SessionManager) GetPane(dogName string) (string, error) {
 	}
 
 	return pane, nil
+}
+
+// ensureKennelSettings creates a minimal .claude/settings.json in the kennel
+// directory if one does not already exist.
+//
+// Dogs run as Claude Haiku with --dangerously-skip-permissions but have no
+// role-specific hooks config, so EnsureSettingsForRole is a no-op for them.
+// Claude Code then walks the parent hierarchy and finds the deacon's
+// .claude/settings.json, inheriting its PreToolUse guard hooks (which block
+// git checkout -b, gh pr create, etc.) and lacking explicit enabledPlugins
+// entries for marketplace plugins, triggering Claude Code's plugin acceptance
+// dialogs on first session start (gt-tt1).
+//
+// The minimal settings created here contain:
+//   - bypassPermissions mode (all tool calls auto-approved)
+//   - skipDangerousModePermissionPrompt (suppress bypass warning dialog)
+//   - beads marketplace plugin disabled (prevent acceptance dialog)
+//
+// No hooks are included — dogs receive their work via the startup beacon and
+// do not require mail-injection hooks.
+//
+// Idempotent: returns nil without writing if the file already exists.
+func ensureKennelSettings(kennelDir string) error {
+	settingsPath := filepath.Join(kennelDir, ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		return fmt.Errorf("creating .claude dir: %w", err)
+	}
+
+	type permissionsBlock struct {
+		DefaultMode string `json:"defaultMode"`
+	}
+	settings := struct {
+		SkipDangerousModePermissionPrompt bool             `json:"skipDangerousModePermissionPrompt"`
+		Permissions                        permissionsBlock `json:"permissions"`
+		EnabledPlugins                     map[string]bool  `json:"enabledPlugins"`
+	}{
+		SkipDangerousModePermissionPrompt: true,
+		Permissions:                        permissionsBlock{DefaultMode: "bypassPermissions"},
+		EnabledPlugins:                     map[string]bool{"beads@beads-marketplace": false},
+	}
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling settings: %w", err)
+	}
+	return os.WriteFile(settingsPath, append(data, '\n'), 0644)
 }
 
 // EnsureRunning ensures a dog session is running, starting it if needed.

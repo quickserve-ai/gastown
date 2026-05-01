@@ -19,8 +19,9 @@ type SyncResult struct {
 }
 
 // SyncPlugins copies plugin directories from source to target.
-// If clean is true, removes plugins from target that don't exist in source.
-func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
+// If clean is true, removes plugins from target that don't exist in source,
+// unless the plugin name is in safelist (intentional orphans to preserve).
+func SyncPlugins(sourceDir, targetDir string, clean bool, safelist []string) (*SyncResult, error) {
 	result := &SyncResult{}
 
 	srcInfo, err := os.Stat(sourceDir)
@@ -67,13 +68,17 @@ func SyncPlugins(sourceDir, targetDir string, clean bool) (*SyncResult, error) {
 	}
 
 	if clean {
+		safeSet := make(map[string]bool, len(safelist))
+		for _, name := range safelist {
+			safeSet[name] = true
+		}
 		dstEntries, err := os.ReadDir(targetDir)
 		if err == nil {
 			for _, entry := range dstEntries {
 				if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 					continue
 				}
-				if !srcPlugins[entry.Name()] {
+				if !srcPlugins[entry.Name()] && !safeSet[entry.Name()] {
 					dstPath := filepath.Join(targetDir, entry.Name())
 					if err := os.RemoveAll(dstPath); err != nil {
 						result.Errors = append(result.Errors, fmt.Sprintf("removing %s: %v", entry.Name(), err))

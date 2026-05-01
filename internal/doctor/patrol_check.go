@@ -507,7 +507,7 @@ func (c *PatrolPluginDriftCheck) Fix(ctx *CheckContext) error {
 	if c.sourceDir == "" || c.targetDir == "" {
 		return fmt.Errorf("drift check did not run; cannot fix")
 	}
-	_, err := plugin.SyncPlugins(c.sourceDir, c.targetDir, false)
+	_, err := plugin.SyncPlugins(c.sourceDir, c.targetDir, false, nil)
 	return err
 }
 

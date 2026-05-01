@@ -115,7 +115,8 @@ install: check-up-to-date build
 	fi
 	@# Sync plugins from build repo to town runtime directories.
 	@# Prevents drift when plugin fixes merge but runtime dirs are stale.
-	@$(INSTALL_DIR)/$(BINARY) plugin sync --source $(CURDIR)/plugins 2>/dev/null && \
+	@$(INSTALL_DIR)/$(BINARY) plugin sync --source $(CURDIR)/plugins --clean \
+		--safelist brain-unprocessed --safelist crosstown-sync && \
 		echo "Plugins synced." || true
 
 # safe-install: Replace binary WITHOUT restarting daemon or killing sessions.

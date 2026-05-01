@@ -122,11 +122,16 @@ var doltLogsCmd = &cobra.Command{
 
 var doltDumpCmd = &cobra.Command{
 	Use:   "dump",
-	Short: "Dump Dolt server goroutine stacks for debugging",
+	Short: "Dump Dolt server goroutine stacks (WARNING: terminates the server)",
 	Long: `Send SIGQUIT to the Dolt server to dump goroutine stacks to its log file.
 
-Per Tim Sehn (Dolt CEO): kill -QUIT prints all goroutine stacks to stderr,
-which is redirected to the server log. Useful for diagnosing hung servers.
+WARNING: SIGQUIT terminates Go programs. This command WILL kill the Dolt server
+after writing the dump. Use it only as a last-resort diagnostic before a
+controlled restart — not as a safe/non-destructive inspection tool.
+
+For non-destructive diagnostics on a running server, use:
+  gt dolt status    # health and latency
+  gt dolt logs      # recent server output
 
 The dump is written to the server log file. Use 'gt dolt logs' to view it.`,
 	RunE: runDoltDump,

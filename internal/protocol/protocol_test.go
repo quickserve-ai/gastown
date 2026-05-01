@@ -708,6 +708,9 @@ func TestDefaultRefineryHandler_HandleMergeReady(t *testing.T) {
 }
 
 func TestDefaultRefineryHandler_NotifyMergeOutcome_Success(t *testing.T) {
+	// Clear town-root env vars so detectTownRoot uses tmpDir, not production Dolt.
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
 	tmpDir := t.TempDir()
 	// Prevent detectTownRoot from finding the real town via GT_TOWN_ROOT/GT_ROOT.
 	// Without this, NewRouter falls back to the production beads and delivers
@@ -728,6 +731,8 @@ func TestDefaultRefineryHandler_NotifyMergeOutcome_Success(t *testing.T) {
 }
 
 func TestDefaultRefineryHandler_NotifyMergeOutcome_Conflict(t *testing.T) {
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
 	tmpDir := t.TempDir()
 	t.Setenv("GT_TOWN_ROOT", tmpDir)
 	t.Setenv("GT_ROOT", tmpDir)
@@ -745,6 +750,8 @@ func TestDefaultRefineryHandler_NotifyMergeOutcome_Conflict(t *testing.T) {
 }
 
 func TestDefaultRefineryHandler_NotifyMergeOutcome_Failure(t *testing.T) {
+	t.Setenv("GT_TOWN_ROOT", "")
+	t.Setenv("GT_ROOT", "")
 	tmpDir := t.TempDir()
 	t.Setenv("GT_TOWN_ROOT", tmpDir)
 	t.Setenv("GT_ROOT", tmpDir)

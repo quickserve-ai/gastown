@@ -1074,6 +1074,10 @@ const (
 	ZombieSessionDeadActive ZombieClassification = "session-dead-active"
 	// ZombieAgentSelfReportedStuck: agent self-reported stuck via heartbeat v2 (gt-3vr5).
 	ZombieAgentSelfReportedStuck ZombieClassification = "agent-self-reported-stuck"
+
+	// ZombieStaleDoneIntentLive: polecat is alive and idle but has a stale done-intent
+	// label (gt done never completed). Flagged for formula-step review; no auto-action.
+	ZombieStaleDoneIntentLive ZombieClassification = "stale-done-intent-live"
 )
 
 // ImpliesActiveWork returns true if this classification indicates the polecat
@@ -1083,7 +1087,8 @@ const (
 func (c ZombieClassification) ImpliesActiveWork() bool {
 	switch c {
 	case ZombieStuckInDone, ZombieAgentDeadInSession, ZombieBeadClosedStillRunning,
-		ZombieDoneIntentDead, ZombieSessionDeadActive, ZombieAgentSelfReportedStuck:
+		ZombieDoneIntentDead, ZombieSessionDeadActive, ZombieAgentSelfReportedStuck,
+		ZombieStaleDoneIntentLive:
 		return true
 	default:
 		return false
@@ -1275,8 +1280,26 @@ func detectZombieLiveSession(bd *BdCli, workDir, townRoot, rigName, polecatName,
 				}
 				return zombie, true
 
-			case polecat.HeartbeatWorking, polecat.HeartbeatIdle:
-				// Fresh heartbeat, healthy state — not a zombie.
+			case polecat.HeartbeatWorking:
+				// Fresh heartbeat, actively working — not a zombie.
+				return ZombieResult{}, false
+
+			case polecat.HeartbeatIdle:
+				// Fresh heartbeat, idle — check for stale done-intent (gt-dhm).
+				// A polecat that set done-intent but went idle without completing
+				// gt done may be stuck. Expose as a zombie for the patrol formula
+				// step to reason about; no automatic action is taken here.
+				if doneIntent != nil && time.Since(doneIntent.Timestamp) > witCfg.DoneIntentStaleLiveTimeoutD() {
+					return ZombieResult{
+						PolecatName:    polecatName,
+						AgentState:     snapState,
+						Classification: ZombieStaleDoneIntentLive,
+						HookBead:       snapHook,
+						WasActive:      true,
+						Action: fmt.Sprintf("flagged-for-review (stale done-intent while idle, age=%v, type=%s)",
+							time.Since(doneIntent.Timestamp).Round(time.Second), doneIntent.ExitType),
+					}, true
+				}
 				return ZombieResult{}, false
 			}
 		}

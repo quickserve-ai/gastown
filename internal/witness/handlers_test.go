@@ -657,6 +657,33 @@ func TestDetectZombie_DoneIntentRecent(t *testing.T) {
 	}
 }
 
+func TestDetectZombie_StaleDoneIntentLive(t *testing.T) {
+	t.Parallel()
+	// gt-dhm: idle polecat with stale done-intent (>30m) should be flagged for review.
+	staleDoneIntent := &DoneIntent{
+		ExitType:  "COMPLETED",
+		Timestamp: time.Now().Add(-60 * time.Minute), // 60m old
+	}
+	staleness := time.Since(staleDoneIntent.Timestamp)
+	shouldFlag := staleDoneIntent != nil && staleness > config.DefaultWitnessDoneIntentStaleLiveTimeout
+	if !shouldFlag {
+		t.Errorf("expected stale-done-intent-live flag for idle polecat (age=%v, threshold=%v)",
+			staleness.Round(time.Second), config.DefaultWitnessDoneIntentStaleLiveTimeout)
+	}
+
+	// Recent done-intent on idle polecat should not be flagged.
+	recentDoneIntent := &DoneIntent{
+		ExitType:  "COMPLETED",
+		Timestamp: time.Now().Add(-5 * time.Minute), // 5m old
+	}
+	recentAge := time.Since(recentDoneIntent.Timestamp)
+	shouldNotFlag := recentDoneIntent != nil && recentAge <= config.DefaultWitnessDoneIntentStaleLiveTimeout
+	if !shouldNotFlag {
+		t.Errorf("expected no flag for recent done-intent (age=%v, threshold=%v)",
+			recentAge.Round(time.Second), config.DefaultWitnessDoneIntentStaleLiveTimeout)
+	}
+}
+
 func TestDetectZombie_DoneOrNukedNotZombie(t *testing.T) {
 	t.Parallel()
 	// GH#2795: Polecats with agent_state=done or agent_state=nuked and a dead

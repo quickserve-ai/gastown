@@ -529,12 +529,15 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 		// where zero commits is expected.
 		// Must be checked before the zero-commit guard below (GH#2496, gt-kvf).
 		isNoMergeTask := false
+		beadMissingFromDB := false
 		if issueID != "" {
 			noMergeBd := beads.New(cwd)
 			if noMergeIssue, showErr := noMergeBd.Show(issueID); showErr == nil {
 				if af := beads.ParseAttachmentFields(noMergeIssue); af != nil && (af.NoMerge || af.ReviewOnly) {
 					isNoMergeTask = true
 				}
+			} else if errors.Is(showErr, beads.ErrNotFound) {
+				beadMissingFromDB = true
 			}
 		}
 
@@ -596,6 +599,12 @@ func runDone(cmd *cobra.Command, args []string) (retErr error) {
 				}
 
 				if !skipClose {
+					if beadMissingFromDB {
+						// Bead was reaped or purged from DB — nothing to verify or close.
+						// Treat as a clean no-work completion rather than a hard failure.
+						style.PrintWarning("work bead %s not found in DB (may have been reaped) — skipping verify and close", issueID)
+						goto notifyWitness
+					}
 					closeReason := "Completed with no code changes (already fixed or pushed directly to main)"
 					noMRCommitSHA, _ := g.Rev("HEAD")
 					if doneSkipVerify {

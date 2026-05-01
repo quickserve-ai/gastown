@@ -316,6 +316,28 @@ This helps the Deacon understand which recovered beads need attention.`,
 	RunE: runDeaconRedispatchState,
 }
 
+var deaconDispatchGatedCmd = &cobra.Command{
+	Use:   "dispatch-gated",
+	Short: "Dispatch molecules ready for gate-resume",
+	Long: `Find molecules blocked on closed gates and dispatch them to polecats.
+
+This implements the async resume cycle for gate-blocked molecule workflows:
+1. Scans all rig beads directories for gate-ready molecules (bd ready --gated)
+2. For each molecule, determines the target rig from the molecule ID prefix
+3. Dispatches via gt sling to resume work from where it was gated
+
+The molecule state IS the waiter — patrol discovers reality each cycle
+without explicit waiter tracking. A gate-ready molecule is one where:
+  - Status is in_progress
+  - Current step has a gate dependency
+  - The gate bead is now closed
+  - No polecat currently has it hooked
+
+Examples:
+  gt deacon dispatch-gated    # Find and dispatch all gate-ready molecules`,
+	RunE: runDeaconDispatchGated,
+}
+
 var deaconFeedStrandedCmd = &cobra.Command{
 	Use:   "feed-stranded",
 	Short: "Detect and feed stranded convoys automatically",
@@ -410,6 +432,7 @@ func init() {
 	deaconCmd.AddCommand(deaconZombieScanCmd)
 	deaconCmd.AddCommand(deaconRedispatchCmd)
 	deaconCmd.AddCommand(deaconRedispatchStateCmd)
+	deaconCmd.AddCommand(deaconDispatchGatedCmd)
 	deaconCmd.AddCommand(deaconFeedStrandedCmd)
 	deaconCmd.AddCommand(deaconFeedStrandedStateCmd)
 
@@ -1571,6 +1594,36 @@ func runDeaconRedispatchState(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	return nil
+}
+
+// runDeaconDispatchGated finds gate-ready molecules and dispatches them.
+func runDeaconDispatchGated(_ *cobra.Command, _ []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	result := deacon.DispatchGated(townRoot)
+
+	if result.Total == 0 {
+		fmt.Printf("%s No gate-ready molecules to dispatch\n", style.Dim.Render("○"))
+		return nil
+	}
+
+	for _, molID := range result.Dispatched {
+		fmt.Printf("%s Dispatched %s\n", style.Bold.Render("✓"), molID)
+	}
+	for _, molID := range result.Skipped {
+		fmt.Printf("%s Skipped %s (could not determine rig)\n", style.Dim.Render("○"), molID)
+	}
+	for _, molID := range result.Failed {
+		fmt.Printf("%s Failed to dispatch %s\n", style.Warning.Render("⚠"), molID)
+	}
+
+	if len(result.Failed) > 0 {
+		return fmt.Errorf("%d molecule(s) failed to dispatch", len(result.Failed))
+	}
 	return nil
 }
 

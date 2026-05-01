@@ -1102,6 +1102,43 @@ func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
 	return issues, nil
 }
 
+// GatedMolecule represents a molecule ready for gate-resume dispatch.
+// Mirrors the bd mol_ready_gated.GatedMolecule output structure.
+type GatedMolecule struct {
+	MoleculeID    string `json:"molecule_id"`
+	MoleculeTitle string `json:"molecule_title"`
+	ClosedGate    *struct {
+		ID        string `json:"id"`
+		AwaitType string `json:"await_type,omitempty"`
+	} `json:"closed_gate,omitempty"`
+	ReadyStep *struct {
+		ID    string `json:"id"`
+		Title string `json:"title,omitempty"`
+	} `json:"ready_step,omitempty"`
+}
+
+// gatedReadyOutput matches the bd ready --gated --json output envelope.
+type gatedReadyOutput struct {
+	Molecules []*GatedMolecule `json:"molecules"`
+	Count     int              `json:"count"`
+}
+
+// ReadyGated returns molecules where a gate has closed and work can resume.
+// Delegates to bd ready --gated which uses the canonical gate-closure detection logic.
+func (b *Beads) ReadyGated() ([]*GatedMolecule, error) {
+	out, err := b.run("ready", "--gated", "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	var result gatedReadyOutput
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parsing bd ready --gated output: %w", err)
+	}
+
+	return result.Molecules, nil
+}
+
 // Show returns detailed information about an issue.
 func (b *Beads) Show(id string) (*Issue, error) {
 	// Route cross-rig queries via routes.jsonl so that rig-level bead IDs

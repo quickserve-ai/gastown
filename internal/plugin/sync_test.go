@@ -30,7 +30,7 @@ func TestSyncPlugins_CopiesNew(t *testing.T) {
 
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\ndo stuff", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := SyncPlugins(srcDir, dstDir, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestSyncPlugins_SkipsUpToDate(t *testing.T) {
 	createTestPlugin(t, srcDir, "my-plugin", content, nil)
 	createTestPlugin(t, dstDir, "my-plugin", content, nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := SyncPlugins(srcDir, dstDir, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestSyncPlugins_UpdatesChanged(t *testing.T) {
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv2 instructions", nil)
 	createTestPlugin(t, dstDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nv1 instructions", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := SyncPlugins(srcDir, dstDir, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestSyncPlugins_CopiesExtraFiles(t *testing.T) {
 	createTestPlugin(t, srcDir, "my-plugin", "+++\nname = \"my-plugin\"\n+++\nstuff",
 		map[string]string{"run.sh": "#!/bin/bash\necho hi"})
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := SyncPlugins(srcDir, dstDir, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestSyncPlugins_CleanRemovesExtra(t *testing.T) {
 	createTestPlugin(t, dstDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
 	createTestPlugin(t, dstDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, true)
+	result, err := SyncPlugins(srcDir, dstDir, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestSyncPlugins_NoCleanKeepsExtra(t *testing.T) {
 	createTestPlugin(t, srcDir, "new-plugin", "+++\nname = \"new-plugin\"\n+++\nnew", nil)
 	createTestPlugin(t, dstDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := SyncPlugins(srcDir, dstDir, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,12 +178,36 @@ func TestSyncPlugins_IgnoresNonPluginDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := SyncPlugins(srcDir, dstDir, false)
+	result, err := SyncPlugins(srcDir, dstDir, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Copied) != 0 {
 		t.Errorf("expected 0 copied (no valid plugins), got %v", result.Copied)
+	}
+}
+
+func TestSyncPlugins_SafelistProtectsOrphan(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	createTestPlugin(t, srcDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
+	createTestPlugin(t, dstDir, "keep-me", "+++\nname = \"keep-me\"\n+++\nkeep", nil)
+	createTestPlugin(t, dstDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nold", nil)
+	createTestPlugin(t, dstDir, "protected", "+++\nname = \"protected\"\n+++\nprotected", nil)
+
+	result, err := SyncPlugins(srcDir, dstDir, true, []string{"protected"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != "old-plugin" {
+		t.Errorf("expected only old-plugin removed, got %v", result.Removed)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "protected")); err != nil {
+		t.Error("protected plugin should not have been removed")
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "old-plugin")); !os.IsNotExist(err) {
+		t.Error("old-plugin should have been removed")
 	}
 }
 

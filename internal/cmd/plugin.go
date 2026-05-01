@@ -26,6 +26,7 @@ var (
 	pluginHistoryLimit int
 	pluginSyncSource   string
 	pluginSyncClean    bool
+	pluginSyncSafelist []string
 	pluginSyncDryRun   bool
 )
 
@@ -153,6 +154,7 @@ func init() {
 	// Sync subcommand flags
 	pluginSyncCmd.Flags().StringVar(&pluginSyncSource, "source", "", "Source plugins directory (auto-detected if omitted)")
 	pluginSyncCmd.Flags().BoolVar(&pluginSyncClean, "clean", false, "Remove plugins from target that don't exist in source")
+	pluginSyncCmd.Flags().StringArrayVar(&pluginSyncSafelist, "safelist", nil, "Plugin names to preserve even when --clean would remove them (repeatable)")
 	pluginSyncCmd.Flags().BoolVar(&pluginSyncDryRun, "dry-run", false, "Show what would happen without syncing")
 
 	// Add subcommands
@@ -537,14 +539,22 @@ func runPluginSync(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %s %s (new, would be copied)\n", style.Success.Render("+"), name)
 		}
 		if pluginSyncClean {
+			safeSet := make(map[string]bool, len(pluginSyncSafelist))
+			for _, s := range pluginSyncSafelist {
+				safeSet[s] = true
+			}
 			for _, name := range report.Extra {
-				fmt.Printf("  %s %s (would be removed)\n", style.Error.Render("-"), name)
+				if safeSet[name] {
+					fmt.Printf("  %s %s (would be removed — PROTECTED by safelist)\n", style.Warning.Render("~"), name)
+				} else {
+					fmt.Printf("  %s %s (would be removed)\n", style.Error.Render("-"), name)
+				}
 			}
 		}
 		return nil
 	}
 
-	result, err := plugin.SyncPlugins(sourceDir, targetDir, pluginSyncClean)
+	result, err := plugin.SyncPlugins(sourceDir, targetDir, pluginSyncClean, pluginSyncSafelist)
 	if err != nil {
 		return fmt.Errorf("syncing plugins: %w", err)
 	}

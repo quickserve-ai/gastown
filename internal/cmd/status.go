@@ -182,7 +182,11 @@ type StatusSum struct {
 // resolveAgentDisplay inspects the actual running process in the tmux session
 // to determine what runtime and model are being used. Falls back to config
 // when the session isn't running.
-func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
+//
+// workerName and rigPath are used for crew workers: they allow per-worker
+// agent overrides (worker_agents / crew_agents) to be reflected in status.
+// Pass empty strings for non-crew roles.
+func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, role, workerName, rigPath, sessionName string, running bool) (alias, info string) {
 	// Map legacy role names to config role names
 	configRole := role
 	switch role {
@@ -192,7 +196,35 @@ func resolveAgentDisplay(townRoot string, townSettings *config.TownSettings, rol
 		configRole = constants.RoleDeacon
 	}
 
-	// Get alias from config
+	// For crew workers, per-worker overrides (worker_agents / crew_agents) take
+	// precedence over the generic role-level agent. Use the same resolution
+	// path that the actual spawn uses so display matches reality.
+	if configRole == constants.RoleCrew && workerName != "" {
+		// Resolve alias: rig-level worker_agents wins over town-level crew_agents.
+		workerAlias := ""
+		if rigPath != "" {
+			if rigSettings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath)); err == nil && rigSettings != nil {
+				workerAlias = rigSettings.WorkerAgents[workerName]
+			}
+		}
+		if workerAlias == "" && townSettings != nil {
+			workerAlias = townSettings.CrewAgents[workerName]
+		}
+		if workerAlias != "" {
+			alias = workerAlias
+			if rc := config.ResolveWorkerAgentConfig(workerName, townRoot, rigPath); rc != nil {
+				if running && sessionName != "" {
+					if detected := detectRuntimeFromSession(sessionName); detected != "" {
+						return alias, detected
+					}
+				}
+				info = buildInfoFromConfig(rc)
+				return alias, info
+			}
+		}
+	}
+
+	// Get alias from config (role-level fallback)
 	if townSettings != nil {
 		alias = townSettings.RoleAgents[configRole]
 		if alias == "" {
@@ -935,17 +967,23 @@ func gatherStatus() (TownStatus, error) {
 
 	wg.Wait()
 
-	// Enrich agents with runtime info — inspect actual running processes
+	// Enrich agents with runtime info — inspect actual running processes.
+	// Global agents (mayor/witness/deacon) have no per-worker overrides; pass empty worker/rig.
 	for i := range status.Agents {
 		a := &status.Agents[i]
-		alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
+		alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, "", "", a.Session, a.Running)
 		a.AgentAlias = alias
 		a.AgentInfo = info
 	}
+	// Rig agents: status.Rigs[i] aligns with rigs[i] (populated in the same indexed goroutine).
 	for i := range status.Rigs {
+		rigPath := ""
+		if i < len(rigs) {
+			rigPath = rigs[i].Path
+		}
 		for j := range status.Rigs[i].Agents {
 			a := &status.Rigs[i].Agents[j]
-			alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Session, a.Running)
+			alias, info := resolveAgentDisplay(townRoot, townSettings, a.Role, a.Name, rigPath, a.Session, a.Running)
 			a.AgentAlias = alias
 			a.AgentInfo = info
 		}

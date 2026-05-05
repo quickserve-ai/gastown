@@ -20,6 +20,7 @@ var (
 	reaperPurgeAge string
 	reaperMailAge  string
 	reaperStaleAge string
+	reaperAckAge   string
 	reaperDryRun   bool
 	reaperJSON     bool
 )
@@ -323,6 +324,123 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 	},
 }
 
+var reaperClosePluginAcksCmd = &cobra.Command{
+	Use:   "close-plugin-acks",
+	Short: "Close plugin receipts, dispatches, and reply-acks (fast-track)",
+	Long: `Close ephemeral plugin wisps that accumulate between full reap cycles.
+
+Targets three categories with a short ack-age threshold (default 1h):
+  - Plugin receipts: outcome wisps from daemon plugin runs
+  - Plugin dispatches: daemon→dog instruction beads
+  - Plugin reply-acks: 'Re: Plugin:*' and 'Re: DOG_DONE:*' wisps from deacon/
+
+These are high-volume ephemeral wisps (~30-50/hour in normal operation) that
+would accumulate for 24h under the standard max-age. A 1h threshold keeps
+the open wisp count manageable without affecting longer-lived work wisps.
+
+When --db is provided, operates on a single database. When omitted,
+auto-discovers all databases on the Dolt server.
+
+Returns counts of closed wisps per category. Use --dry-run to preview.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ackAge, err := time.ParseDuration(reaperAckAge)
+		if err != nil {
+			return fmt.Errorf("invalid --ack-age: %w", err)
+		}
+
+		databases := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		if reaperDB != "" {
+			databases = strings.Split(reaperDB, ",")
+		}
+
+		type dbResult struct {
+			Database  string `json:"database"`
+			Receipts  int    `json:"receipts_closed"`
+			Dispatches int   `json:"dispatches_closed"`
+			Acks      int    `json:"acks_closed"`
+			DryRun    bool   `json:"dry_run,omitempty"`
+		}
+
+		var results []dbResult
+		for _, dbName := range databases {
+			if err := reaper.ValidateDBName(dbName); err != nil {
+				fmt.Fprintf(os.Stderr, "skip invalid db: %s\n", dbName)
+				continue
+			}
+			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: connect error: %v\n", dbName, err)
+				continue
+			}
+			ok, schemaErr := reaper.HasReaperSchema(db)
+			if schemaErr != nil {
+				db.Close()
+				continue
+			} else if !ok {
+				db.Close()
+				continue
+			}
+
+			r, _ := reaper.ClosePluginReceipts(db, dbName, ackAge, reaperDryRun)
+			d, _ := reaper.ClosePluginDispatches(db, dbName, ackAge, reaperDryRun)
+			a, _ := reaper.ClosePluginAcks(db, dbName, ackAge, reaperDryRun)
+			db.Close()
+
+			receipts, dispatches, acks := 0, 0, 0
+			if r != nil {
+				receipts = r.Closed
+			}
+			if d != nil {
+				dispatches = d.Closed
+			}
+			if a != nil {
+				acks = a.Closed
+			}
+			if receipts+dispatches+acks == 0 {
+				continue
+			}
+			results = append(results, dbResult{
+				Database:   dbName,
+				Receipts:   receipts,
+				Dispatches: dispatches,
+				Acks:       acks,
+				DryRun:     reaperDryRun,
+			})
+		}
+
+		if reaperJSON {
+			fmt.Println(reaper.FormatJSON(results))
+		} else {
+			var totalReceipts, totalDispatches, totalAcks int
+			for _, r := range results {
+				prefix := ""
+				if r.DryRun {
+					prefix = "[DRY RUN] would close "
+				} else {
+					prefix = "closed "
+				}
+				fmt.Printf("%s: %s%d receipts, %d dispatches, %d acks\n",
+					r.Database, prefix, r.Receipts, r.Dispatches, r.Acks)
+				totalReceipts += r.Receipts
+				totalDispatches += r.Dispatches
+				totalAcks += r.Acks
+			}
+			if len(results) > 1 || (len(results) == 1 && results[0].Receipts+results[0].Dispatches+results[0].Acks > 0) {
+				prefix := ""
+				if reaperDryRun {
+					prefix = "[DRY RUN] "
+				}
+				fmt.Printf("\n%sTotal: %d receipts, %d dispatches, %d acks closed\n",
+					prefix, totalReceipts, totalDispatches, totalAcks)
+			}
+			if len(results) == 0 {
+				fmt.Println("No plugin acks to close")
+			}
+		}
+		return nil
+	},
+}
+
 var reaperAutoCloseCmd = &cobra.Command{
 	Use:   "auto-close",
 	Short: "Close stale issues past stale-age",
@@ -539,7 +657,7 @@ func init() {
 		}
 	}
 
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperRunCmd, reaperDatabasesCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperClosePluginAcksCmd, reaperRunCmd, reaperDatabasesCmd} {
 		cmd.Flags().StringVar(&reaperDB, "db", "", "Database name (required for single-db commands)")
 		cmd.Flags().StringVar(&reaperHost, "host", defaultHost, "Dolt server host (env: GT_DOLT_HOST)")
 		cmd.Flags().IntVar(&reaperPort, "port", defaultPort, "Dolt server port (env: GT_DOLT_PORT)")
@@ -547,7 +665,7 @@ func init() {
 	}
 
 	// JSON output flag for single-db commands
-	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperDatabasesCmd} {
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperReapCmd, reaperPurgeCmd, reaperAutoCloseCmd, reaperClosePluginAcksCmd, reaperDatabasesCmd} {
 		cmd.Flags().BoolVar(&reaperJSON, "json", false, "Output as JSON")
 	}
 
@@ -563,10 +681,13 @@ func init() {
 		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d)")
 	}
 
+	reaperClosePluginAcksCmd.Flags().StringVar(&reaperAckAge, "ack-age", "1h", "Max plugin ack/receipt age before closing")
+
 	reaperCmd.AddCommand(reaperDatabasesCmd)
 	reaperCmd.AddCommand(reaperScanCmd)
 	reaperCmd.AddCommand(reaperReapCmd)
 	reaperCmd.AddCommand(reaperPurgeCmd)
+	reaperCmd.AddCommand(reaperClosePluginAcksCmd)
 	reaperCmd.AddCommand(reaperAutoCloseCmd)
 	reaperCmd.AddCommand(reaperRunCmd)
 

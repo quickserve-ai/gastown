@@ -500,6 +500,12 @@ type WitnessThresholds struct {
 	// may be stuck (gt-dhm). The witness exposes this as a zombie for the patrol
 	// formula step to reason about — no automatic action is taken.
 	DoneIntentStaleLiveTimeout string `json:"done_intent_stale_live_timeout,omitempty"`
+
+	// HeartbeatStartupGrace is how long after session creation the witness waits
+	// before flagging a live polecat with assigned work but no heartbeat file as
+	// possibly stuck at startup (e.g., auth 401 blocking initialization, default "5m").
+	// The witness exposes the signal; patrol formula decides whether to escalate.
+	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

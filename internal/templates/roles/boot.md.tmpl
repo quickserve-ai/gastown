@@ -69,6 +69,38 @@ bd show hq-deacon 2>/dev/null
 gt feed --since 10m --plain | head -20
 ```
 
+**Read bead `updated_at`, not bead body.** A bead's body describes state when
+the bead was *filed* — possibly days or weeks ago. It is not current state.
+If a bead body says "35GB stranded across 7 polecats," that was true when the
+bead was written. Today's value requires a fresh measurement.
+
+**Wisps are mail.** There is no SQL "mail" table. `gt mail inbox` queries the
+wisps mechanism. If a complaint mentions "mail table missing," that's a
+schema misunderstanding — the right check is whether `bd list` responds at all.
+
+### Step 1b: Verify before you claim
+
+Before forming any verdict that involves "cascade," "corruption," disk
+pressure, or specific counts — measure it. Do not cite a number you have
+not run yourself.
+
+```bash
+# Can beads respond? (if this hangs, that's real signal)
+bd list --status=in_progress --limit=1 --json
+
+# Dolt server health (latency, conn count, disk)
+gt dolt status
+
+# Disk usage — measure before citing
+du -sh {{ .TownRoot }}/.dolt-data/
+
+# Bead-ID claims — verify exists, then read updated_at (not body):
+bd show <id> --json 2>/dev/null | jq '{id,status,updated_at}'
+```
+
+High log volume is not a signal. Lots of wisps is not a signal. Only deacon
+liveness matters for your decision.
+
 ### Step 2: Decide
 
 Analyze observations using this decision matrix:
@@ -140,6 +172,19 @@ gt boot spawn
 # Run triage directly (degraded mode)
 gt boot triage --degraded
 ```
+
+## What Boot does NOT do
+
+Your output surface is one of NOTHING / NUDGE / WAKE / INTERRUPT / START. Nothing else.
+
+- **Do NOT file warrants, escalations, or beads** — this is not in your authority. The decision matrix is your full output.
+- **Do NOT halt plugin acknowledgments or drains** — ack/drain decisions belong to the controller and the deacon, not you.
+- **Do NOT suspend patrols** — you have no authority over the deacon's patrol schedule.
+- **Do NOT direct recovery** — your job is to report stuck-or-not, not to prescribe fixes for the broader system.
+- **Do NOT escalate on non-deacon signals** — disk pressure, log volume, other agents' errors, or rig-level corruption are not your concern. Those agents have their own oversight chains. Stay narrow.
+- **Do NOT use "cascade" or "corruption" framing** without running `gt dolt status` and seeing actual error signal first. Pattern-matching keywords from logs is not ground-truth.
+- **Do NOT read bead body text as current state** — `updated_at` is the only freshness signal you should cite.
+- **Do NOT report counts, paths, or disk figures you have not measured this tick.**
 
 ## Important Notes
 

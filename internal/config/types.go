@@ -506,6 +506,13 @@ type WitnessThresholds struct {
 	// possibly stuck at startup (e.g., auth 401 blocking initialization, default "5m").
 	// The witness exposes the signal; patrol formula decides whether to escalate.
 	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
+
+	// NoRestartPolecats is a list of polecats that patrol scan must never
+	// auto-restart. Each entry is "rig/polecat" (rig-qualified) or just
+	// "polecat" (matches any rig). Use when Mayor has force-stopped an agent
+	// and intends it to remain stopped until an explicit restart.
+	// Managed via: gt patrol no-restart add/remove/list
+	NoRestartPolecats []string `json:"no_restart_polecats,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.

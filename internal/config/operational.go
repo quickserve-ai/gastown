@@ -753,3 +753,19 @@ func (wt *WitnessThresholds) HeartbeatStartupGraceD() time.Duration {
 	}
 	return DefaultWitnessHeartbeatStartupGrace
 }
+
+// IsRestartBlocked returns true if the polecat should not be auto-restarted
+// by patrol scan. Checks both "polecat" and "rig/polecat" forms against
+// NoRestartPolecats. (gt-8x15)
+func (wt *WitnessThresholds) IsRestartBlocked(rigName, polecatName string) bool {
+	if wt == nil {
+		return false
+	}
+	qualified := rigName + "/" + polecatName
+	for _, entry := range wt.NoRestartPolecats {
+		if entry == polecatName || entry == qualified {
+			return true
+		}
+	}
+	return false
+}

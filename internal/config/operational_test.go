@@ -395,6 +395,38 @@ func TestWitnessThresholds_Overrides(t *testing.T) {
 	}
 }
 
+func TestWitnessThresholds_IsRestartBlocked(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		cfg       *WitnessThresholds
+		rigName   string
+		polecat   string
+		wantBlock bool
+	}{
+		{"nil config", nil, "qcore", "lisa", false},
+		{"empty list", &WitnessThresholds{}, "qcore", "lisa", false},
+		{"unqualified match", &WitnessThresholds{NoRestartPolecats: []string{"lisa"}}, "qcore", "lisa", true},
+		{"unqualified no match", &WitnessThresholds{NoRestartPolecats: []string{"lisa"}}, "qcore", "lana", false},
+		{"qualified match", &WitnessThresholds{NoRestartPolecats: []string{"qcore/lisa"}}, "qcore", "lisa", true},
+		{"qualified wrong rig", &WitnessThresholds{NoRestartPolecats: []string{"qcore/lisa"}}, "gastown", "lisa", false},
+		{"qualified wrong polecat", &WitnessThresholds{NoRestartPolecats: []string{"qcore/lisa"}}, "qcore", "lana", false},
+		{"multiple entries, match", &WitnessThresholds{NoRestartPolecats: []string{"gastown/lana", "qcore/lisa"}}, "qcore", "lisa", true},
+		{"multiple entries, no match", &WitnessThresholds{NoRestartPolecats: []string{"gastown/lana", "qcore/ray"}}, "qcore", "lisa", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.cfg.IsRestartBlocked(tt.rigName, tt.polecat)
+			if got != tt.wantBlock {
+				t.Errorf("IsRestartBlocked(%q, %q) = %v, want %v", tt.rigName, tt.polecat, got, tt.wantBlock)
+			}
+		})
+	}
+}
+
 func TestPressureThresholds_Defaults(t *testing.T) {
 	t.Parallel()
 

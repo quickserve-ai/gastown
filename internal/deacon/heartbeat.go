@@ -158,6 +158,12 @@ func (hb *Heartbeat) IsFresh() bool {
 	return hb != nil && hb.Age() < HeartbeatStaleThreshold
 }
 
+// IsFreshWith returns true if the heartbeat age is less than staleThreshold.
+// Callers that load thresholds from operational config should prefer this over IsFresh.
+func (hb *Heartbeat) IsFreshWith(staleThreshold time.Duration) bool {
+	return hb != nil && hb.Age() < staleThreshold
+}
+
 // IsStale returns true if the heartbeat is 5-20 minutes old.
 // A stale heartbeat may indicate the Deacon is doing a long operation.
 func (hb *Heartbeat) IsStale() bool {
@@ -168,10 +174,34 @@ func (hb *Heartbeat) IsStale() bool {
 	return age >= HeartbeatStaleThreshold && age < HeartbeatVeryStaleThreshold
 }
 
+// IsStaleWith returns true if the heartbeat age is between staleThreshold and veryStaleThreshold.
+// Callers that load thresholds from operational config should prefer this over IsStale.
+func (hb *Heartbeat) IsStaleWith(staleThreshold, veryStaleThreshold time.Duration) bool {
+	if hb == nil {
+		return false
+	}
+	age := hb.Age()
+	return age >= staleThreshold && age < veryStaleThreshold
+}
+
 // IsVeryStale returns true if the heartbeat is more than 20 minutes old.
 // A very stale heartbeat means the Deacon should be poked.
 func (hb *Heartbeat) IsVeryStale() bool {
 	return hb == nil || hb.Age() >= HeartbeatVeryStaleThreshold
+}
+
+// IsVeryStaleWith returns true if the heartbeat is nil or older than veryStaleThreshold.
+// Callers that load thresholds from operational config should prefer this over IsVeryStale.
+func (hb *Heartbeat) IsVeryStaleWith(veryStaleThreshold time.Duration) bool {
+	return hb == nil || hb.Age() >= veryStaleThreshold
+}
+
+// IsStuck returns true if the Deacon should be considered stuck based on heartbeat age.
+// running must be true (session exists); stuck = running && very-stale heartbeat.
+// Use the configured veryStaleThreshold from operational config rather than the
+// hardcoded constant so operators can tune the threshold without recompiling.
+func IsStuck(running bool, hb *Heartbeat, veryStaleThreshold time.Duration) bool {
+	return running && hb.IsVeryStaleWith(veryStaleThreshold)
 }
 
 // Touch writes a minimal heartbeat with just the timestamp.

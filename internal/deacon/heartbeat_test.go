@@ -419,3 +419,53 @@ func TestWriteHeartbeat_SetsTimestamp(t *testing.T) {
 		t.Error("Timestamp should be recent")
 	}
 }
+
+func TestHeartbeat_WithThresholds(t *testing.T) {
+	stale := 5 * time.Minute
+	veryStale := 20 * time.Minute
+
+	fresh := &Heartbeat{Timestamp: time.Now().Add(-1 * time.Minute)}
+	stalish := &Heartbeat{Timestamp: time.Now().Add(-10 * time.Minute)}
+	veryOld := &Heartbeat{Timestamp: time.Now().Add(-30 * time.Minute)}
+
+	if !fresh.IsFreshWith(stale) {
+		t.Error("IsFreshWith: expected fresh heartbeat to be fresh")
+	}
+	if stalish.IsFreshWith(stale) {
+		t.Error("IsFreshWith: expected stale heartbeat to not be fresh")
+	}
+	if !stalish.IsStaleWith(stale, veryStale) {
+		t.Error("IsStaleWith: expected stale heartbeat to be stale")
+	}
+	if fresh.IsStaleWith(stale, veryStale) {
+		t.Error("IsStaleWith: expected fresh heartbeat to not be stale")
+	}
+	if !veryOld.IsVeryStaleWith(veryStale) {
+		t.Error("IsVeryStaleWith: expected old heartbeat to be very stale")
+	}
+	if fresh.IsVeryStaleWith(veryStale) {
+		t.Error("IsVeryStaleWith: expected fresh heartbeat to not be very stale")
+	}
+	if (*Heartbeat)(nil).IsVeryStaleWith(veryStale) == false {
+		t.Error("IsVeryStaleWith: nil heartbeat should be very stale")
+	}
+}
+
+func TestIsStuck(t *testing.T) {
+	veryStale := 20 * time.Minute
+	freshHB := &Heartbeat{Timestamp: time.Now().Add(-1 * time.Minute)}
+	staleHB := &Heartbeat{Timestamp: time.Now().Add(-30 * time.Minute)}
+
+	if IsStuck(true, freshHB, veryStale) {
+		t.Error("IsStuck: running + fresh heartbeat should not be stuck")
+	}
+	if !IsStuck(true, staleHB, veryStale) {
+		t.Error("IsStuck: running + very stale heartbeat should be stuck")
+	}
+	if !IsStuck(true, nil, veryStale) {
+		t.Error("IsStuck: running + nil heartbeat should be stuck")
+	}
+	if IsStuck(false, staleHB, veryStale) {
+		t.Error("IsStuck: not running should never be stuck")
+	}
+}

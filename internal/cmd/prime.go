@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ var primeState bool
 var primeStateJSON bool
 var primeExplain bool
 var primeStructuredSessionStartOutput bool
+var primeTerse bool
+var primeMaxMails int
 
 // primeHookSource stores the SessionStart source ("startup", "resume", "clear", "compact")
 // when running in hook mode. Used to provide lighter output on compaction/resume.
@@ -106,6 +109,10 @@ func init() {
 		"Output state as JSON (requires --state)")
 	primeCmd.Flags().BoolVar(&primeExplain, "explain", false,
 		"Show why each section was included")
+	primeCmd.Flags().BoolVar(&primeTerse, "terse", false,
+		"Collapse stable-doctrine sections to one-liners (~5KB savings for crew role)")
+	primeCmd.Flags().IntVar(&primeMaxMails, "max-mails", 0,
+		"Cap injected unread mail to N most recent (0 = unlimited)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -613,7 +620,11 @@ func runMemoryInject() {
 // runMailCheckInject runs `gt mail check --inject` and outputs the result.
 // This injects any pending mail into the agent's context.
 func runMailCheckInject(workDir string) {
-	cmd := exec.Command("gt", "mail", "check", "--inject")
+	args := []string{"mail", "check", "--inject"}
+	if primeMaxMails > 0 {
+		args = append(args, "--max-mails", strconv.Itoa(primeMaxMails))
+	}
+	cmd := exec.Command("gt", args...)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer

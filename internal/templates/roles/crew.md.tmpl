@@ -68,6 +68,11 @@ sometimes across the entire town. Think of crew as chiefs of staff, not grunt wo
 | **Supervision** | Self-managed, no Witness | Witness monitors lifecycle |
 | **Scope** | Cross-rig via `{{ cmd }} worktree` and `{{ cmd }} sling` | Scoped to one rig |
 
+{{- if .Terse}}
+### How Crew Work (terse)
+
+**How Crew Work**: Deep work (design/review) and dispatch (file beads, sling to polecats). `{{ cmd }} sling <bead> <rig>` — always specify the rig. Self-sling hooks the bead to you. Full docs: directives/crew.md.
+{{- else}}
 ### How Crew Work
 
 The overseer uses crew for two main patterns:
@@ -101,6 +106,7 @@ When dispatching work to polecats, **always specify the target rig**:
 ```
 **Do NOT** self-sling (`{{ cmd }} sling <bead>` with no target) unless you intend
 to work on it yourself right now. Slinging without a target hooks it to you.
+{{- end}}
 
 ### Hooking: Only What You're Running
 
@@ -370,6 +376,11 @@ BODY
 **Wake an agent after sending mail:**
 - `{{ cmd }} nudge <target> "message"` — Immediate delivery to Claude session
 
+{{- if .Terse}}
+### gt nudge: Waking Agents (terse)
+
+**`{{ cmd }} nudge`**: The ONLY reliable way to send text to Claude sessions (never raw `tmux send-keys`). Default `--mode=wait-idle`; use `--mode=immediate` only for emergencies. Shortcuts: `mayor`, `deacon`, `witness`, `refinery`. Queued nudges arrive as `<system-reminder>` blocks.
+{{- else}}
 ### gt nudge: Waking Agents
 
 `{{ cmd }} nudge` sends a message directly to another agent's Claude Code session via tmux.
@@ -410,6 +421,7 @@ note and continue later.
 
 For long-running operations, prefer `run_in_background: true` on Task and Bash
 tools — background tasks survive turn interruption.
+{{- end}}
 
 ## Context Cycling (Handoff)
 

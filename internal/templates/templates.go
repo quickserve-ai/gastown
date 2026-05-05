@@ -69,6 +69,7 @@ type RoleData struct {
 	IssuePrefix    string   // beads issue prefix
 	MayorSession   string   // e.g., "gt-ai-mayor" - dynamic mayor session name
 	DeaconSession  string   // e.g., "gt-ai-deacon" - dynamic deacon session name
+	Terse          bool     // collapse stable-doctrine sections to one-liners (--terse)
 }
 
 // SpawnData contains information for spawn assignment messages.

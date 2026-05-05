@@ -74,6 +74,7 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 	// checked before going idle (prevents mail from sitting unread).
 	if mailCheckInject {
 		// Agent-side E-stop check (defense-in-depth).
+		// Note: E-stop check runs regardless of mailCheckMaxMails — it's a safety gate.
 		// If an E-stop is active (town-wide or per-rig), inject a system reminder
 		// telling the agent to checkpoint and wait. This catches agents that
 		// survived the SIGTSTP freeze.
@@ -92,6 +93,10 @@ func runMailCheck(cmd *cobra.Command, args []string) error {
 
 		if unread > 0 {
 			messages = filterUnreadMessages(messages)
+			if mailCheckMaxMails > 0 && len(messages) > mailCheckMaxMails {
+				// Keep the N most-recent messages (slice is newest-first from mailbox.List).
+				messages = messages[:mailCheckMaxMails]
+			}
 			fmt.Print(formatInjectOutput(messages))
 			// Ack after output so message is delivered before being marked acked.
 			if ackErr := mailbox.AcknowledgeDeliveries(address, messages); ackErr != nil {

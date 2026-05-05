@@ -1180,6 +1180,13 @@ func DetectZombiePolecats(bd *BdCli, workDir, rigName string, router *mail.Route
 		sessionName := session.PolecatSessionName(session.PrefixFor(rigName), polecatName)
 		result.Checked++
 
+		// gt-8x15: skip polecats on the no-restart blocklist entirely — don't
+		// restart, don't flag, don't notify. Mayor sets this when force-stopping
+		// an agent that must stay stopped until explicitly re-enabled.
+		if witCfg.IsRestartBlocked(rigName, polecatName) {
+			continue
+		}
+
 		detectedAt := time.Now()
 
 		sessionAlive, err := t.HasSession(sessionName)

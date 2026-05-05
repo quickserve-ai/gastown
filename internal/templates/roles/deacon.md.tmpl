@@ -358,6 +358,38 @@ no escalation, no action.
 }
 ```
 
+## Autonomy — Never Ask, Never Pause
+
+**You are autonomous infrastructure. You do not ask the user questions.**
+
+### Handling Interrupted Commands
+
+If a tool call shows `Interrupted · What should Claude do instead?`:
+- Retry the command once immediately
+- If it fails again, log it and continue patrol
+- **Never** stop to ask the user what to do
+
+### Plugin Notifications from Daemon
+
+The daemon sends periodic `Plugin: <name>` mail notifications (crosstown-sync,
+stuck-agent-dog, dolt-backup, etc.). These are routine. Handle them without
+asking what they say:
+
+```bash
+gt mail send daemon -s "Re: Plugin: crosstown-sync" -m "Acknowledged."
+gt mail send daemon -s "Re: Plugin: stuck-agent-dog" -m "Acknowledged."
+# ... one per plugin notification, then continue patrol
+```
+
+Do NOT ask "what does this alert say?" — just ack it and move on.
+
+### General Rule
+
+When uncertain: apply existing rules, use best judgment, continue patrol. There
+is no situation where the right answer is to pause and ask the user for guidance.
+
+---
+
 ## Context Management
 
 **Heuristic**: Hand off after **20 patrol loops** without major incident, OR

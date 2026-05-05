@@ -641,6 +641,7 @@ func runDeaconAttach(cmd *cobra.Command, args []string) error {
 type DeaconStatusOutput struct {
 	Running   bool             `json:"running"`
 	Paused    bool             `json:"paused"`
+	Stuck     bool             `json:"stuck"`
 	Session   string           `json:"session"`
 	Heartbeat *HeartbeatStatus `json:"heartbeat,omitempty"`
 }
@@ -678,27 +679,47 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking session: %w", err)
 	}
 
+	// Load configured heartbeat thresholds (falls back to compiled-in defaults).
+	var staleThreshold, veryStaleThreshold time.Duration
+	if townRoot != "" {
+		opCfg := config.LoadOperationalConfig(townRoot)
+		deaconCfg := opCfg.GetDeaconConfig()
+		staleThreshold = deaconCfg.HeartbeatStaleThresholdD()
+		veryStaleThreshold = deaconCfg.HeartbeatVeryStaleThresholdD()
+	} else {
+		staleThreshold = config.DefaultDeaconHeartbeatStaleThreshold
+		veryStaleThreshold = config.DefaultDeaconHeartbeatVeryStale
+	}
+
 	// Read heartbeat
+	var hb *deacon.Heartbeat
 	var hbStatus *HeartbeatStatus
 	if townRoot != "" {
-		if hb := deacon.ReadHeartbeat(townRoot); hb != nil {
+		hb = deacon.ReadHeartbeat(townRoot)
+		if hb != nil {
 			hbStatus = &HeartbeatStatus{
 				Timestamp:  hb.Timestamp,
 				AgeSec:     hb.Age().Seconds(),
 				Cycle:      hb.Cycle,
 				LastAction: hb.LastAction,
-				Fresh:      hb.IsFresh(),
-				Stale:      hb.IsStale(),
-				VeryStale:  hb.IsVeryStale(),
+				Fresh:      hb.IsFreshWith(staleThreshold),
+				Stale:      hb.IsStaleWith(staleThreshold, veryStaleThreshold),
+				VeryStale:  hb.IsVeryStaleWith(veryStaleThreshold),
 			}
 		}
 	}
+
+	// Compute stuck: session exists but not paused and heartbeat is very stale.
+	// This is the Go-transport primitive Boot can read directly instead of LLM
+	// pattern-matching pane output (ZFC principle — see gt-nb7).
+	stuck := !paused && deacon.IsStuck(running, hb, veryStaleThreshold)
 
 	// JSON output
 	if deaconStatusJSON {
 		out := DeaconStatusOutput{
 			Running:   running,
 			Paused:    paused,
+			Stuck:     stuck,
 			Session:   sessionName,
 			Heartbeat: hbStatus,
 		}
@@ -764,6 +785,13 @@ func runDeaconStatus(cmd *cobra.Command, args []string) error {
 	} else if townRoot != "" {
 		fmt.Println()
 		fmt.Printf("  Heartbeat: %s\n", style.Dim.Render("no heartbeat file"))
+	}
+
+	if stuck {
+		fmt.Println()
+		fmt.Printf("%s Deacon appears stuck (running but heartbeat very stale)\n",
+			style.Bold.Render("⚠️"))
+		fmt.Printf("  Run: %s\n", style.Dim.Render("gt boot triage"))
 	}
 
 	if running {

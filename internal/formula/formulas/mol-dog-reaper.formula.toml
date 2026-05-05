@@ -112,9 +112,30 @@ log a warning and consider escalating.
 **Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
 
 [[steps]]
+id = "close-plugin-acks"
+title = "Close plugin receipts, dispatches, and reply-acks"
+needs = ["reap"]
+description = """
+Close ephemeral plugin wisps with a fast-track (1h) threshold — these accumulate
+at ~30-50/hour and would wait 24h under the standard max_age (hq-efryp2 root cause).
+
+**1. For each database:**
+```bash
+gt reaper close-plugin-acks --db=<name> --port={{dolt_port}} \\
+  --ack-age=1h {{#if dry_run}}--dry-run{{/if}} --json
+```
+
+**Categories closed:**
+- Plugin receipts: daemon plugin outcome wisps
+- Plugin dispatches: daemon→dog instruction beads
+- Plugin reply-acks: 'Re: Plugin:*' and 'Re: DOG_DONE:*' wisps from deacon/
+
+**Exit criteria:** All plugin acks older than 1h closed."""
+
+[[steps]]
 id = "purge"
 title = "Purge old closed wisps and mail"
-needs = ["reap"]
+needs = ["close-plugin-acks"]
 description = """
 Delete closed wisps past purge_age and closed mail past mail_delete_age.
 

@@ -796,6 +796,7 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 
 	// Step 2: Create step beads and wire dependencies
 	stepBeads := make(map[string]string) // step.ID -> bead ID
+	var failedSteps []string
 
 	for _, step := range f.Steps {
 		stepBeadID := fmt.Sprintf("%s-wfs-%s", rigPrefix, generateFormulaShortID())
@@ -824,8 +825,12 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 			Build()
 		createCmd.Stdin = strings.NewReader(step.Description)
 		if err := createCmd.Run(); err != nil {
-			fmt.Printf("%s Failed to create step bead for %s: %v\n",
+			// Step creation failed — likely a Dolt push timeout (auto-push fails after
+			// the local write succeeds). Track the failure and continue so other steps
+			// can still be created. A summary is emitted after all steps are attempted.
+			fmt.Printf("%s Failed to create step bead for '%s': %v\n",
 				style.Dim.Render("Warning:"), step.ID, err)
+			failedSteps = append(failedSteps, step.ID)
 			continue
 		}
 
@@ -853,6 +858,16 @@ func executeWorkflowFormula(f *formula.Formula, formulaName, targetRig string) e
 			needsStr = fmt.Sprintf(" (needs: %s)", strings.Join(step.Needs, ", "))
 		}
 		fmt.Printf("  %s %s: %s%s\n", style.Dim.Render("○"), step.ID, stepBeadID, needsStr)
+	}
+
+	if len(failedSteps) > 0 {
+		fmt.Printf("\n%s %d/%d step(s) failed to create: %s\n",
+			style.Bold.Render("⚠️  WARNING:"),
+			len(failedSteps), len(f.Steps),
+			strings.Join(failedSteps, ", "))
+		fmt.Printf("  Likely cause: Dolt auto-push timeout on remote write.\n")
+		fmt.Printf("  Workflow %s was created but some steps may be missing.\n", workflowID)
+		fmt.Printf("  Re-run the formula or create missing steps manually with: bd create\n\n")
 	}
 
 	// Step 3: Identify and dispatch ready steps (those with no dependencies)

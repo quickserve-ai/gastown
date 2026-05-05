@@ -158,10 +158,14 @@ action: restart requested
 BODY
 done
 
-# Deacon issues: escalate
-if [ -n "$DEACON_ISSUE" ]; then
+# Deacon issues: escalate only when session is truly dead; nudge on stale heartbeat.
+# (Matches commit 58b594f intent — see plugin.md.)
+if [ "$DEACON_ISSUE" = "crashed" ] || [ "$DEACON_ISSUE" = "zombie" ]; then
   log "Escalating deacon issue: $DEACON_ISSUE"
   gt escalate "Deacon $DEACON_ISSUE detected by stuck-agent-dog" -s HIGH 2>/dev/null || true
+elif [[ "$DEACON_ISSUE" == stuck_heartbeat* ]]; then
+  log "Nudging live Deacon to refresh stale heartbeat ($DEACON_ISSUE)"
+  gt nudge deacon "stuck-agent-dog: heartbeat stale — refresh with gt heartbeat --state=working" 2>/dev/null || true
 fi
 
 # --- Report -------------------------------------------------------------------

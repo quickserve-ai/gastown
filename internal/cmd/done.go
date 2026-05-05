@@ -1753,14 +1753,29 @@ func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) {
 	}
 
 doneStateUpdate:
-	// Clear hook_bead on the agent bead (gt-qbh). The hq-l6mm5 refactor made
-	// SetHookBead/ClearHookBead no-ops, but the witness still reads the
-	// hook_bead field from the agent bead snapshot. If the hooked bead is a
-	// wisp that gets reaped, the witness can't verify it was closed and flags
-	// the polecat as a zombie. Clearing hook_bead prevents this false positive.
-	emptyHook := ""
-	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
+	// Detect work dispatched while this bead was in progress (gt-0ob, Symptom B).
+	// After the current bead is closed, any remaining status=hooked bead for this
+	// agent is a new assignment from the dispatcher. Preserve it in hook_bead so
+	// the agent sees the pending assignment on return to idle.
+	var pendingBead string
+	if exitType != ExitDeferred && hookedBeadID != "" {
+		agentActorID := roleInfo.ActorString()
+		if agentActorID != "" {
+			if found := findHookedBeadForAgent(bd, agentActorID); found != "" && found != hookedBeadID {
+				pendingBead = found
+			}
+		}
+	}
+
+	// Update hook_bead: preserve pending assignment or clear (gt-qbh).
+	// The witness reads hook_bead from the agent bead snapshot — clearing it
+	// prevents false-zombie flags when the hooked wisp gets reaped.
+	newHookBead := pendingBead
+	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &newHookBead}); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't update hook_bead on %s: %v\n", agentBeadID, err)
+	}
+	if pendingBead != "" {
+		fmt.Printf("Pending work: %s was hooked while busy — run 'bd show %s' to start\n", pendingBead, pendingBead)
 	}
 
 	// Purge closed ephemeral beads (wisps) accumulated during this and prior sessions.

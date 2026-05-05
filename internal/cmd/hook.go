@@ -12,10 +12,13 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -148,12 +151,35 @@ Related commands:
 	RunE: runHookClear,
 }
 
+var hookReconcileCmd = &cobra.Command{
+	Use:         "reconcile",
+	Short:       "Clear zombie hooks from stalled polecat sessions",
+	Long: `Scan all polecats for orphaned hook assignments (gt-0ob, Symptom A).
+
+A zombie hook occurs when a polecat session crashes without calling 'gt done',
+leaving its assigned bead in 'hooked' status permanently. The bead becomes
+unreachable: no active agent will complete it, and dispatchers won't reassign it.
+
+Reconcile detects stalled polecats (session dead, work assigned) and resets
+their hooked beads back to open so dispatchers can reassign them.
+
+Use --dry-run to preview without making changes.
+
+This command is safe to run at any time. It only touches beads belonging to
+polecats in StateStalled (session dead + hook set) — idle and working polecats
+are never affected.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runHookReconcile(hookReconcileDryRun)
+	},
+}
+
 var (
-	hookSubject string
-	hookMessage string
-	hookDryRun  bool
-	hookForce   bool
-	hookClear   bool
+	hookSubject      string
+	hookMessage      string
+	hookDryRun       bool
+	hookForce        bool
+	hookClear        bool
+	hookReconcileDryRun bool
 )
 
 func init() {
@@ -179,11 +205,14 @@ func init() {
 	hookClearCmd.Flags().BoolVarP(&hookDryRun, "dry-run", "n", false, "Show what would be done")
 	hookClearCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Clear even if work is incomplete")
 
+	hookReconcileCmd.Flags().BoolVarP(&hookReconcileDryRun, "dry-run", "n", false, "Preview without making changes")
+
 	hookCmd.AddCommand(hookStatusCmd)
 	hookCmd.AddCommand(hookShowCmd)
 	hookCmd.AddCommand(hookAttachCmd)
 	hookCmd.AddCommand(hookDetachCmd)
 	hookCmd.AddCommand(hookClearCmd)
+	hookCmd.AddCommand(hookReconcileCmd)
 
 	rootCmd.AddCommand(hookCmd)
 }
@@ -659,4 +688,76 @@ func sessionNameToCanonicalAddress(sessionName, targetHint string) (string, bool
 // findTownRoot finds the Gas Town root directory.
 func findTownRoot() (string, error) {
 	return workspace.FindFromCwd()
+}
+
+// runHookReconcile scans all polecats for zombie hooks and resets them (gt-0ob, Symptom A).
+// A zombie hook is a bead stuck in 'hooked' status because its polecat session died
+// without calling 'gt done'. Reconcile detects these via polecat.StateStalled and
+// resets the hooked bead to 'open' so dispatchers can reassign it.
+func runHookReconcile(dryRun bool) error {
+	allRigs, err := getAllRigs()
+	if err != nil {
+		return err
+	}
+
+	t := tmux.NewTmux()
+	total := 0
+
+	for _, r := range allRigs {
+		polecatGit := git.NewGit(r.Path)
+		mgr := polecat.NewManager(r, polecatGit, t)
+
+		polecats, err := mgr.List()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't list polecats for %s: %v\n", r.Name, err)
+			continue
+		}
+
+		bd := beads.New(r.Path)
+
+		for _, p := range polecats {
+			if !p.State.IsStalled() {
+				continue
+			}
+			agentID := fmt.Sprintf("%s/polecats/%s", r.Name, p.Name)
+			hookedBead := findHookedBeadForAgent(bd, agentID)
+			if hookedBead == "" {
+				continue
+			}
+
+			total++
+			if dryRun {
+				fmt.Printf("[DRY RUN] Would clear zombie hook: %s/%s → %s\n", r.Name, p.Name, hookedBead)
+				continue
+			}
+
+			// Reset hooked bead to open so dispatchers can reassign it.
+			openStatus := "open"
+			emptyAssignee := ""
+			if err := bd.Update(hookedBead, beads.UpdateOptions{
+				Status:   &openStatus,
+				Assignee: &emptyAssignee,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: couldn't reset %s to open: %v\n", hookedBead, err)
+			}
+
+			// Clear hook_bead on the agent bead to prevent false zombie flags from the witness.
+			agentBeadID := polecatBeadIDForRig(r, r.Name, p.Name)
+			emptyHook := ""
+			if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
+			}
+
+			fmt.Printf("Cleared zombie hook: %s/%s → %s (reset to open)\n", r.Name, p.Name, hookedBead)
+		}
+	}
+
+	if total == 0 {
+		prefix := ""
+		if dryRun {
+			prefix = "[DRY RUN] "
+		}
+		fmt.Printf("%sNo zombie hooks found\n", prefix)
+	}
+	return nil
 }

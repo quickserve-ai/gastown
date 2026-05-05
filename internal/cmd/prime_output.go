@@ -82,6 +82,7 @@ func outputPrimeContext(ctx RoleContext) (string, error) {
 		DogName:       ctx.Polecat, // ctx.Polecat holds the dog name for RoleDog
 		MayorSession:  session.MayorSessionName(),
 		DeaconSession: session.DeaconSessionName(),
+		Terse:         primeTerse,
 	}
 
 	// Render and output

@@ -29,6 +29,7 @@ var (
 	mailCheckInject   bool
 	mailCheckJSON     bool
 	mailCheckIdentity string
+	mailCheckMaxMails int
 	mailThreadJSON    bool
 	mailReplySubject  string
 	mailReplyMessage  string
@@ -494,6 +495,7 @@ func init() {
 	mailCheckCmd.Flags().BoolVar(&mailCheckJSON, "json", false, "Output as JSON")
 	mailCheckCmd.Flags().StringVar(&mailCheckIdentity, "identity", "", "Explicit identity for inbox (e.g., greenplace/Toast)")
 	mailCheckCmd.Flags().StringVar(&mailCheckIdentity, "address", "", "Alias for --identity")
+	mailCheckCmd.Flags().IntVar(&mailCheckMaxMails, "max-mails", 0, "Cap injected unread mail to N most recent (0 = unlimited)")
 
 	// Thread flags
 	mailThreadCmd.Flags().BoolVar(&mailThreadJSON, "json", false, "Output as JSON")

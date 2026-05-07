@@ -48,6 +48,7 @@ Merge Strategy (--merge):
   Controls how completed work lands. Stored on the auto-convoy.
   gt sling gt-abc gastown --merge=direct  # Push branch directly to main
   gt sling gt-abc gastown --merge=mr      # Merge queue (default)
+  gt sling gt-abc gastown --merge=pr      # Alias for mr (GitHub PR terminology)
   gt sling gt-abc gastown --merge=local   # Keep on feature branch
 
 Target Resolution:
@@ -155,7 +156,7 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingOwned, "owned", false, "Mark auto-convoy as caller-managed lifecycle (no automatic witness/refinery registration)")
 	slingCmd.Flags().BoolVar(&slingHookRawBead, "hook-raw-bead", false, "Hook raw bead without default formula (expert mode)")
 	slingCmd.Flags().BoolVar(&slingNoMerge, "no-merge", false, "Skip merge queue on completion (keep work on feature branch for review)")
-	slingCmd.Flags().StringVar(&slingMerge, "merge", "", "Merge strategy: direct (push to main), mr (merge queue, default), local (keep on branch)")
+	slingCmd.Flags().StringVar(&slingMerge, "merge", "", "Merge strategy: direct (push to main), mr/pr (merge queue, default), local (keep on branch)")
 	slingCmd.Flags().BoolVar(&slingNoBoot, "no-boot", false, "Skip rig boot after polecat spawn (avoids witness/refinery lock contention)")
 	slingCmd.Flags().IntVar(&slingMaxConcurrent, "max-concurrent", 0, "Throttle spawn rate: spawn N polecats, pause, then spawn N more (0 = no throttle). Does not limit total concurrent polecats")
 	slingCmd.Flags().StringVar(&slingBaseBranch, "base-branch", "", "Override base branch for polecat worktree (e.g., 'develop', 'release/v2')")
@@ -222,13 +223,17 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("polecats cannot sling (use gt done for handoff)")
 	}
 
-	// Validate --merge flag if provided
+	// Validate --merge flag if provided. "pr" is accepted as an alias for "mr"
+	// (GitHub PR vs GitLab MR — same concept).
 	if slingMerge != "" {
+		if slingMerge == "pr" {
+			slingMerge = "mr"
+		}
 		switch slingMerge {
 		case "direct", "mr", "local":
 			// Valid
 		default:
-			return fmt.Errorf("invalid --merge value %q: must be direct, mr, or local", slingMerge)
+			return fmt.Errorf("invalid --merge value %q: must be direct, mr, pr, or local", slingMerge)
 		}
 	}
 

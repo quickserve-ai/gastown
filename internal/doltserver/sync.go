@@ -24,6 +24,10 @@ type SyncOptions struct {
 
 	// Filter restricts sync to a single database name. Empty means all.
 	Filter string
+
+	// Branch specifies the remote branch to pull. Empty means use the configured
+	// upstream tracking branch. Only used by pull operations.
+	Branch string
 }
 
 // SyncResult records the outcome of syncing a single database.
@@ -150,7 +154,7 @@ func validSQLName(name string) bool {
 
 // PullDatabaseSQL pulls a database from its remote via SQL (CALL DOLT_PULL) through
 // the running Dolt server. This avoids lock contention with the server process.
-func PullDatabaseSQL(townRoot, db, remote string) error {
+func PullDatabaseSQL(townRoot, db, remote, branch string) error {
 	if !validSQLName(db) {
 		return fmt.Errorf("invalid database name %q: must match [a-zA-Z0-9_.-]+", db)
 	}
@@ -158,8 +162,17 @@ func PullDatabaseSQL(townRoot, db, remote string) error {
 		return fmt.Errorf("invalid remote name %q: must match [a-zA-Z0-9_.-]+", remote)
 	}
 
-	// Pull via SQL — fetch + merge through the running server
-	pullQuery := fmt.Sprintf("USE `%s`; CALL DOLT_PULL('%s')", db, remote)
+	// Pull via SQL — fetch + merge through the running server.
+	// Include the branch when specified so Dolt doesn't rely on upstream tracking.
+	var pullQuery string
+	if branch != "" {
+		if !validSQLName(branch) {
+			return fmt.Errorf("invalid branch name %q: must match [a-zA-Z0-9_.-]+", branch)
+		}
+		pullQuery = fmt.Sprintf("USE `%s`; CALL DOLT_PULL('%s', '%s')", db, remote, branch)
+	} else {
+		pullQuery = fmt.Sprintf("USE `%s`; CALL DOLT_PULL('%s')", db, remote)
+	}
 
 	// Pull can be slow for large databases or slow remotes
 	config := DefaultConfig(townRoot)
@@ -175,10 +188,14 @@ func PullDatabaseSQL(townRoot, db, remote string) error {
 	return nil
 }
 
-// PullDatabase pulls a Dolt database directory from the specified remote's main branch
-// using the CLI. Requires the Dolt server to be stopped (CLI mode).
-func PullDatabase(dbDir, remote string) error {
-	cmd := exec.Command("dolt", "pull", remote, "main")
+// PullDatabase pulls a Dolt database directory from the specified remote using the CLI.
+// Requires the Dolt server to be stopped (CLI mode).
+// branch specifies which remote branch to pull; defaults to "main" when empty.
+func PullDatabase(dbDir, remote, branch string) error {
+	if branch == "" {
+		branch = "main"
+	}
+	cmd := exec.Command("dolt", "pull", remote, branch)
 	cmd.Dir = dbDir
 	setProcessGroup(cmd)
 	output, err := cmd.CombinedOutput()
@@ -242,7 +259,7 @@ func PullDatabasesSQL(townRoot string, opts SyncOptions) []SyncResult {
 		}
 
 		// Pull via SQL (server stays running)
-		if err := PullDatabaseSQL(townRoot, db, remoteName); err != nil {
+		if err := PullDatabaseSQL(townRoot, db, remoteName, opts.Branch); err != nil {
 			result.Error = err
 			results = append(results, result)
 			continue
@@ -307,7 +324,7 @@ func PullDatabases(townRoot string, opts SyncOptions) []SyncResult {
 			continue
 		}
 
-		if err := PullDatabase(dbDir, remoteName); err != nil {
+		if err := PullDatabase(dbDir, remoteName, opts.Branch); err != nil {
 			result.Error = err
 			results = append(results, result)
 			continue

@@ -265,9 +265,10 @@ that the server is managing can cause exclusive lock contention and prevent
 server restarts.
 
 Examples:
-  gt dolt pull                # Pull all databases with remotes
-  gt dolt pull --db xtm       # Pull only the xtm database
-  gt dolt pull --dry-run      # Preview what would be pulled`,
+  gt dolt pull                        # Pull all databases with remotes
+  gt dolt pull --db xtm               # Pull only the xtm database
+  gt dolt pull --db xtm --branch main # Pull xtm from origin/main (fixes missing upstream tracking)
+  gt dolt pull --dry-run              # Preview what would be pulled`,
 	RunE: runDoltPull,
 }
 
@@ -372,6 +373,7 @@ var (
 	doltSyncGC          bool
 	doltPullDry         bool
 	doltPullDB          string
+	doltPullBranch      string
 )
 
 func init() {
@@ -415,6 +417,7 @@ func init() {
 
 	doltPullCmd.Flags().BoolVar(&doltPullDry, "dry-run", false, "Preview what would be pulled without pulling")
 	doltPullCmd.Flags().StringVar(&doltPullDB, "db", "", "Pull a single database instead of all")
+	doltPullCmd.Flags().StringVar(&doltPullBranch, "branch", "", "Remote branch to pull (default: configured upstream tracking branch)")
 
 	doltMigrateWispsCmd.Flags().BoolVar(&doltMigrateWispsDry, "dry-run", false, "Preview what would be migrated without making changes")
 	doltMigrateWispsCmd.Flags().StringVar(&doltMigrateWispsDB, "db", "", "Target database (default: auto-detect from rig)")
@@ -1693,6 +1696,7 @@ func runDoltPull(cmd *cobra.Command, args []string) error {
 	opts := doltserver.SyncOptions{
 		DryRun: doltPullDry,
 		Filter: doltPullDB,
+		Branch: doltPullBranch,
 	}
 
 	// Use SQL pull through the running server (no lock contention).

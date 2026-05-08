@@ -139,6 +139,11 @@ needs = ["close-plugin-acks"]
 description = """
 Delete closed wisps past purge_age and closed mail past mail_delete_age.
 
+**0. Skip-if-empty:** If the scan found 0 purge candidates across ALL databases,
+close this step now with "No purge candidates — nothing to do" and proceed to
+auto-close. Always close the step explicitly — leaving it OPEN when skipped
+makes it indistinguishable from a stuck step.
+
 **1. For each database with purge candidates:**
 ```bash
 gt reaper purge --db=<name> --port={{dolt_port}} \\
@@ -154,7 +159,8 @@ gt reaper purge --db=<name> --port={{dolt_port}} \\
 retention window. Active wisps are never touched. Reverse dependency
 references are cleaned up to prevent dangling parent refs.
 
-**Exit criteria:** Old closed wisps and mail purged."""
+**Exit criteria:** Old closed wisps and mail purged (or step closed with
+"No purge candidates" if nothing qualified this cycle)."""
 
 [[steps]]
 id = "auto-close"

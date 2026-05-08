@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -352,6 +354,49 @@ After migration, 'bd mol wisp list' will work and agent lifecycle
 	RunE: runDoltMigrateWisps,
 }
 
+var doltBackupCmd = &cobra.Command{
+	Use:   "backup",
+	Short: "Show and manage Dolt backup remotes",
+	Long: `Show configured backup remotes and their disk usage.
+
+Lists all file:// backup remotes across all databases, with current
+disk usage for each backup directory.
+
+Use 'gt dolt backup reset' to rebuild a bloated backup from scratch.
+
+Examples:
+  gt dolt backup               # List all backup remotes + disk usage
+  gt dolt backup reset --db hq # Reset hq's backup to reclaim disk space`,
+	RunE: runDoltBackup,
+}
+
+var doltBackupResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Reset a backup remote — clear and resync to reclaim disk space",
+	Long: `Reset a Dolt backup remote to recover disk space.
+
+Over time, Dolt backup directories accumulate NBS chunk files and .darc
+archives from previous backup generations. A database GC/flatten removes
+old history from the live database but does not prune the backup, causing
+the backup to grow larger than the live database.
+
+Reset does a safe rebuild:
+  1. Stop the Dolt server (briefly, for remote remove/add)
+  2. Remove the backup remote from the database config
+  3. Clear the backup directory (preserves beads JSONL exports: *.jsonl, backup_state.json)
+  4. Re-add the backup remote with the same URL
+  5. Restart the Dolt server
+  6. Run dolt backup sync for a clean baseline (~live database size)
+
+--db is required. --remote defaults to the first file:// remote found.
+
+Examples:
+  gt dolt backup reset --db hq              # Reset hq's first file:// backup
+  gt dolt backup reset --db hq --dry-run    # Preview without changes
+  gt dolt backup reset --db hq --remote backup_export  # Name a specific remote`,
+	RunE: runDoltBackupReset,
+}
+
 var (
 	doltLogLines     int
 	doltLogFollow    bool
@@ -374,6 +419,10 @@ var (
 	doltPullDry         bool
 	doltPullDB          string
 	doltPullBranch      string
+
+	doltBackupResetDry    bool
+	doltBackupResetDB     string
+	doltBackupResetRemote string
 )
 
 func init() {
@@ -397,6 +446,8 @@ func init() {
 	doltCmd.AddCommand(doltSyncCmd)
 	doltCmd.AddCommand(doltPullCmd)
 	doltCmd.AddCommand(doltMigrateWispsCmd)
+	doltCmd.AddCommand(doltBackupCmd)
+	doltBackupCmd.AddCommand(doltBackupResetCmd)
 
 	doltKillImpostersCmd.Flags().BoolVar(&doltKillImpostersDry, "dry-run", false, "Preview without killing")
 
@@ -421,6 +472,10 @@ func init() {
 
 	doltMigrateWispsCmd.Flags().BoolVar(&doltMigrateWispsDry, "dry-run", false, "Preview what would be migrated without making changes")
 	doltMigrateWispsCmd.Flags().StringVar(&doltMigrateWispsDB, "db", "", "Target database (default: auto-detect from rig)")
+
+	doltBackupResetCmd.Flags().BoolVar(&doltBackupResetDry, "dry-run", false, "Preview without making changes")
+	doltBackupResetCmd.Flags().StringVar(&doltBackupResetDB, "db", "", "Database to reset backup for (required)")
+	doltBackupResetCmd.Flags().StringVar(&doltBackupResetRemote, "remote", "", "Backup remote name (default: first file:// remote found)")
 
 	doltReapCmd.Flags().BoolVar(&doltReapDry, "dry-run", false, "Preview which connections would be killed")
 	doltReapCmd.Flags().Int64Var(&doltReapMaxIdle, "max-idle", 300, "Kill idle (Sleep) connections older than this many seconds")
@@ -1824,4 +1879,280 @@ func printMigrateWispsResult(result *doltserver.MigrateWispsResult) {
 	if result.AgentsCopied == 0 && len(result.AuxTablesCreated) == 0 && !result.WispsTableCreated {
 		fmt.Printf("  %s Already migrated (no changes needed)\n", style.Bold.Render("✓"))
 	}
+}
+
+// doltRepoStateBackup holds the backup remote info from Dolt's repo_state.json.
+type doltRepoStateBackup struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// doltRepoState is a minimal parse of Dolt's repo_state.json.
+type doltRepoState struct {
+	Backups map[string]doltRepoStateBackup `json:"backups"`
+}
+
+// readDoltRepoState reads and parses repo_state.json for a database.
+func readDoltRepoState(dbDir string) (*doltRepoState, error) {
+	data, err := os.ReadFile(filepath.Join(dbDir, ".dolt", "repo_state.json"))
+	if err != nil {
+		return nil, err
+	}
+	var state doltRepoState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+// dirSize returns the disk usage of a directory in bytes using du -sk.
+func dirSize(path string) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "du", "-sk", path).Output()
+	if err != nil {
+		return 0, err
+	}
+	// du -sk output: "<kibibytes>\t<path>"
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("unexpected du output: %q", out)
+	}
+	kb, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return kb * 1024, nil
+}
+
+func runDoltBackup(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	config := doltserver.DefaultConfig(townRoot)
+	databases, err := doltserver.ListDatabases(townRoot)
+	if err != nil {
+		return fmt.Errorf("listing databases: %w", err)
+	}
+
+	type backupInfo struct {
+		db     string
+		remote string
+		url    string
+		path   string
+		size   int64
+	}
+
+	var infos []backupInfo
+	for _, db := range databases {
+		dbDir := filepath.Join(config.DataDir, db)
+		state, err := readDoltRepoState(dbDir)
+		if err != nil {
+			continue
+		}
+		for _, b := range state.Backups {
+			if !strings.HasPrefix(b.URL, "file://") {
+				continue
+			}
+			localPath := strings.TrimPrefix(b.URL, "file://")
+			size, _ := dirSize(localPath)
+			infos = append(infos, backupInfo{db: db, remote: b.Name, url: b.URL, path: localPath, size: size})
+		}
+	}
+
+	if len(infos) == 0 {
+		fmt.Println("No file:// backup remotes configured.")
+		return nil
+	}
+
+	fmt.Printf("Backup remotes (%d):\n\n", len(infos))
+	for _, info := range infos {
+		fmt.Printf("  %s / %s\n", style.Bold.Render(info.db), info.remote)
+		fmt.Printf("    URL:  %s\n", info.url)
+		fmt.Printf("    Path: %s\n", info.path)
+		if info.size > 0 {
+			fmt.Printf("    Size: %s\n", formatBytes(info.size))
+		} else {
+			fmt.Printf("    Size: (unavailable)\n")
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("Run 'gt dolt backup reset --db <name>' to reset a bloated backup.")
+	return nil
+}
+
+func runDoltBackupReset(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	if doltBackupResetDB == "" {
+		return fmt.Errorf("--db is required\nExample: gt dolt backup reset --db hq")
+	}
+
+	config := doltserver.DefaultConfig(townRoot)
+	if config.IsRemote() {
+		return fmt.Errorf("backup reset requires local Dolt server (remote: %s)", config.HostPort())
+	}
+
+	dbDir := filepath.Join(config.DataDir, doltBackupResetDB)
+	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
+		return fmt.Errorf("database %q not found in %s\nRun 'gt dolt list' to see available databases", doltBackupResetDB, config.DataDir)
+	}
+
+	state, err := readDoltRepoState(dbDir)
+	if err != nil {
+		return fmt.Errorf("reading repo_state.json for %s: %w", doltBackupResetDB, err)
+	}
+
+	// Find the target backup remote.
+	var target doltRepoStateBackup
+	if doltBackupResetRemote != "" {
+		b, ok := state.Backups[doltBackupResetRemote]
+		if !ok {
+			return fmt.Errorf("backup remote %q not found for database %s", doltBackupResetRemote, doltBackupResetDB)
+		}
+		target = b
+	} else {
+		for _, b := range state.Backups {
+			if strings.HasPrefix(b.URL, "file://") {
+				target = b
+				break
+			}
+		}
+		if target.Name == "" {
+			return fmt.Errorf("no file:// backup remote found for database %s\nRun 'gt dolt backup' to list remotes", doltBackupResetDB)
+		}
+	}
+
+	if !strings.HasPrefix(target.URL, "file://") {
+		return fmt.Errorf("backup remote %q uses non-file URL %q — reset only supports file:// remotes", target.Name, target.URL)
+	}
+
+	backupPath := strings.TrimPrefix(target.URL, "file://")
+
+	// Report current state.
+	beforeSize, _ := dirSize(backupPath)
+	fmt.Printf("Backup reset: %s / %s\n", style.Bold.Render(doltBackupResetDB), target.Name)
+	fmt.Printf("  Remote:     %s\n", target.URL)
+	fmt.Printf("  Path:       %s\n", backupPath)
+	if beforeSize > 0 {
+		fmt.Printf("  Current:    %s\n", formatBytes(beforeSize))
+	}
+	fmt.Println()
+
+	if doltBackupResetDry {
+		fmt.Println("[dry-run] Would stop server, remove remote, clear backup dir, re-add, restart, sync.")
+		return nil
+	}
+
+	// Count preserved files for reporting.
+	entries, _ := os.ReadDir(backupPath)
+	var preserved []string
+	for _, e := range entries {
+		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".jsonl") || e.Name() == "backup_state.json") {
+			preserved = append(preserved, e.Name())
+		}
+	}
+
+	// Phase 1: Stop server.
+	wasRunning, _, _ := doltserver.IsRunning(townRoot)
+	if wasRunning {
+		fmt.Printf("Stopping Dolt server...\n")
+		if err := doltserver.Stop(townRoot); err != nil {
+			return fmt.Errorf("stopping server: %w", err)
+		}
+	}
+
+	var resetErr error
+	func() {
+		// Phase 2: Remove backup remote config.
+		fmt.Printf("Removing backup remote %q from %s...\n", target.Name, doltBackupResetDB)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		rmCmd := exec.CommandContext(ctx, "dolt", "backup", "rm", target.Name)
+		rmCmd.Dir = dbDir
+		if rmOut, err := rmCmd.CombinedOutput(); err != nil {
+			resetErr = fmt.Errorf("dolt backup rm %s: %s: %s", target.Name, err, strings.TrimSpace(string(rmOut)))
+			return
+		}
+
+		// Phase 3: Clear backup directory (preserve JSONL and beads tracking files).
+		fmt.Printf("Clearing backup directory (preserving %d JSONL files)...\n", len(preserved))
+		entries, err := os.ReadDir(backupPath)
+		if err != nil {
+			resetErr = fmt.Errorf("reading backup dir: %w", err)
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasSuffix(name, ".jsonl") || name == "backup_state.json" {
+				continue
+			}
+			entryPath := filepath.Join(backupPath, name)
+			if e.IsDir() {
+				if err := os.RemoveAll(entryPath); err != nil {
+					resetErr = fmt.Errorf("removing %s: %w", entryPath, err)
+					return
+				}
+			} else {
+				if err := os.Remove(entryPath); err != nil {
+					resetErr = fmt.Errorf("removing %s: %w", entryPath, err)
+					return
+				}
+			}
+		}
+
+		// Phase 4: Re-add backup remote.
+		fmt.Printf("Re-adding backup remote %q → %s...\n", target.Name, target.URL)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel2()
+		addCmd := exec.CommandContext(ctx2, "dolt", "backup", "add", target.Name, target.URL)
+		addCmd.Dir = dbDir
+		if addOut, err := addCmd.CombinedOutput(); err != nil {
+			resetErr = fmt.Errorf("dolt backup add: %s: %s", err, strings.TrimSpace(string(addOut)))
+			return
+		}
+	}()
+
+	// Phase 5: Restart server (always, even if reset partially failed).
+	if wasRunning {
+		fmt.Printf("Restarting Dolt server...\n")
+		if err := doltserver.Start(townRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to restart Dolt server: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Run 'gt dolt start' to bring it back up.\n")
+		} else {
+			fmt.Printf("  Server restarted.\n")
+		}
+	}
+
+	if resetErr != nil {
+		return resetErr
+	}
+
+	// Phase 6: Sync (server is running — this is the slow step).
+	fmt.Printf("Running dolt backup sync %s (this may take a while)...\n", target.Name)
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer syncCancel()
+	syncCmd := exec.CommandContext(syncCtx, "dolt", "backup", "sync", target.Name)
+	syncCmd.Dir = dbDir
+	if out, err := syncCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("dolt backup sync: %s: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	afterSize, _ := dirSize(backupPath)
+	fmt.Printf("\n%s Backup reset complete.\n", style.Bold.Render("✓"))
+	if beforeSize > 0 && afterSize > 0 {
+		saved := beforeSize - afterSize
+		fmt.Printf("  Before: %s\n", formatBytes(beforeSize))
+		fmt.Printf("  After:  %s\n", formatBytes(afterSize))
+		if saved > 0 {
+			fmt.Printf("  Saved:  %s\n", formatBytes(saved))
+		}
+	}
+	return nil
 }

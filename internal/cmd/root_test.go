@@ -143,6 +143,12 @@ func TestPersistentPreRunLoadsAgentRegistry(t *testing.T) {
 	config.ResetRegistryForTesting()
 	t.Cleanup(config.ResetRegistryForTesting)
 
+	// persistentPreRun calls os.Exit(1) on Darwin when BuiltProperly is unset
+	// (test binaries built with go test don't have ldflags). Override for tests.
+	origBuiltProperly := BuiltProperly
+	BuiltProperly = "1"
+	t.Cleanup(func() { BuiltProperly = origBuiltProperly })
+
 	// Build a minimal fake town root with mayor/town.json (PrimaryMarker)
 	// and settings/agents.json containing a process_names override.
 	townRoot := t.TempDir()
@@ -211,6 +217,11 @@ func TestPersistentPreRunMalformedAgentRegistry(t *testing.T) {
 	// NOTE: cannot use t.Parallel() — mutates cwd and global agent registry.
 	config.ResetRegistryForTesting()
 	t.Cleanup(config.ResetRegistryForTesting)
+
+	// persistentPreRun calls os.Exit(1) on Darwin when BuiltProperly is unset.
+	origBuiltProperly := BuiltProperly
+	BuiltProperly = "1"
+	t.Cleanup(func() { BuiltProperly = origBuiltProperly })
 
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {

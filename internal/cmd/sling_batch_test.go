@@ -909,7 +909,16 @@ exit 0
 		t.Errorf("create should include 'Work: Fix the widget' in args:\n%s", logContent)
 	}
 
-	if helperTownRoot != townRoot {
+	// Normalize symlinks before comparing (macOS: /var -> /private/var)
+	wantTownRoot, _ := filepath.EvalSymlinks(townRoot)
+	gotTownRoot, _ := filepath.EvalSymlinks(helperTownRoot)
+	if wantTownRoot == "" {
+		wantTownRoot = townRoot
+	}
+	if gotTownRoot == "" {
+		gotTownRoot = helperTownRoot
+	}
+	if gotTownRoot != wantTownRoot {
 		t.Errorf("tracking helper townRoot = %q, want %q", helperTownRoot, townRoot)
 	}
 	if helperConvoyID != convoyID {

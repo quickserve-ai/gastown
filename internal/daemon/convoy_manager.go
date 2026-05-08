@@ -30,6 +30,12 @@ const (
 	// auto-close. This prevents a race where the daemon's stranded scan
 	// fires before the sling's bd dep add is visible in Dolt. See GH#2303.
 	convoyGracePeriod = 5 * time.Minute
+
+	// strandedScanCooldown is the minimum time between consecutive stranded-scan
+	// actions on the same convoy. Without this, a scan running every 5s (recovery
+	// mode) hammers gt convoy check repeatedly for convoys that can't make progress
+	// (e.g., target rig unavailable), causing a DOLT_COMMIT flood on hq. (gt-jjzx)
+	strandedScanCooldown = 2 * time.Minute
 )
 
 // strandedConvoyInfo matches the JSON output of `gt convoy stranded --json`.
@@ -112,6 +118,12 @@ type ConvoyManager struct {
 	// been handled. This allows the 1s overlap window above without replaying
 	// the same lifecycle events on every poll.
 	processedLifecycleEvents sync.Map // map[string]bool
+
+	// strandedLastActed tracks the last time the scan took action on a convoy
+	// (feedFirstReady, checkConvoyCompletion, or closeEmptyConvoy). Prevents
+	// hammering gt convoy check / gt sling when the target rig is unavailable
+	// and the scan runs on a short recovery-mode interval. (gt-jjzx)
+	strandedLastActed sync.Map // map[string]time.Time
 }
 
 // NewConvoyManager creates a new convoy manager.
@@ -485,7 +497,17 @@ func (m *ConvoyManager) scan() {
 		default:
 		}
 
+		// Rate-limit per-convoy actions: skip if this convoy was acted on recently.
+		// Prevents a DOLT_COMMIT flood when many convoys target an unavailable rig
+		// and the stranded scan runs on the short 5s recovery-mode interval. (gt-jjzx)
+		if v, ok := m.strandedLastActed.Load(c.ID); ok {
+			if time.Since(v.(time.Time)) < strandedScanCooldown {
+				continue
+			}
+		}
+
 		if c.ReadyCount > 0 {
+			m.strandedLastActed.Store(c.ID, time.Now())
 			m.feedFirstReady(c)
 		} else if c.TrackedCount == 0 {
 			// Empty convoy — but skip if it was just created (GH#2303).
@@ -494,6 +516,7 @@ func (m *ConvoyManager) scan() {
 				m.logger("Convoy %s: empty but within grace period (created %s ago) — skipping", c.ID, time.Since(c.CreatedAt).Round(time.Second))
 				continue
 			}
+			m.strandedLastActed.Store(c.ID, time.Now())
 			m.closeEmptyConvoy(c.ID)
 		} else {
 			// Tracked issues exist but none are ready. This could mean:
@@ -501,6 +524,7 @@ func (m *ConvoyManager) scan() {
 			// (b) issues are blocked/in-progress → needs agent review
 			// Run convoy check to handle case (a); it's a no-op for (b).
 			m.logger("Convoy %s: %d tracked issues, 0 ready — checking completion", c.ID, c.TrackedCount)
+			m.strandedLastActed.Store(c.ID, time.Now())
 			m.checkConvoyCompletion(c.ID)
 		}
 	}

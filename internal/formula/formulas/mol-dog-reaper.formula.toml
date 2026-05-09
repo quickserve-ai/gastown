@@ -83,7 +83,17 @@ gt reaper scan --db=<name> --port={{dolt_port}} \\
 - If no candidates found across all databases, skip remaining steps
 - If anomalies are severe, consider escalating before proceeding
 
-**Exit criteria:** Scan complete, candidates identified, anomalies flagged."""
+**5. Close this step (REQUIRED — workflow advancement):**
+This bead is a workflow step. Polecat-work's "report-only → DEFERRED" exit
+PRESERVES the bead and would stall the workflow. Instead, close the step
+bead explicitly so the witness can dispatch the next step:
+```bash
+bd close <this step's ID>        # advances the workflow
+gt done --status DEFERRED         # releases the polecat session
+```
+
+**Exit criteria:** Scan complete, candidates identified, anomalies flagged,
+step bead closed."""
 
 [[steps]]
 id = "reap"
@@ -109,7 +119,14 @@ gt reaper reap --db=<name> --port={{dolt_port}} \\
 If total open wisps across all databases exceed {{alert_threshold}},
 log a warning and consider escalating.
 
-**Exit criteria:** All stale wisps closed (or dry-run counts reported)."""
+**4. Close this step (REQUIRED — workflow advancement):**
+```bash
+bd close <this step's ID>        # advances the workflow
+gt done --status DEFERRED         # releases the polecat session
+```
+
+**Exit criteria:** All stale wisps closed (or dry-run counts reported),
+step bead closed."""
 
 [[steps]]
 id = "close-plugin-acks"
@@ -130,7 +147,13 @@ gt reaper close-plugin-acks --db=<name> --port={{dolt_port}} \\
 - Plugin dispatches: daemon→dog instruction beads
 - Plugin reply-acks: 'Re: Plugin:*' and 'Re: DOG_DONE:*' wisps from deacon/
 
-**Exit criteria:** All plugin acks older than 1h closed."""
+**Close this step (REQUIRED — workflow advancement):**
+```bash
+bd close <this step's ID>        # advances the workflow
+gt done --status DEFERRED         # releases the polecat session
+```
+
+**Exit criteria:** All plugin acks older than 1h closed, step bead closed."""
 
 [[steps]]
 id = "purge"
@@ -159,8 +182,14 @@ gt reaper purge --db=<name> --port={{dolt_port}} \\
 retention window. Active wisps are never touched. Reverse dependency
 references are cleaned up to prevent dangling parent refs.
 
+**Close this step (REQUIRED — workflow advancement):**
+```bash
+bd close <this step's ID>        # advances the workflow
+gt done --status DEFERRED         # releases the polecat session
+```
+
 **Exit criteria:** Old closed wisps and mail purged (or step closed with
-"No purge candidates" if nothing qualified this cycle)."""
+"No purge candidates" if nothing qualified this cycle), step bead closed."""
 
 [[steps]]
 id = "auto-close"
@@ -181,7 +210,13 @@ gt reaper auto-close --db=<name> --port={{dolt_port}} \\
 - Verify exclusions are working (P0/P1, epics, dependency-linked issues
   should never be auto-closed)
 
-**Exit criteria:** All eligible stale issues auto-closed."""
+**3. Close this step (REQUIRED — workflow advancement):**
+```bash
+bd close <this step's ID>        # advances the workflow
+gt done --status DEFERRED         # releases the polecat session
+```
+
+**Exit criteria:** All eligible stale issues auto-closed, step bead closed."""
 
 [[steps]]
 id = "report"
@@ -208,7 +243,13 @@ Generate summary and signal completion.
 gt escalate "Reaper anomalies detected" -s MEDIUM -m "<anomaly details>"
 ```
 
-**Exit criteria:** Report generated, anomalies escalated if any."""
+**3. Close this step (REQUIRED — final step of the workflow):**
+```bash
+bd close <this step's ID>        # marks the workflow complete
+gt done --status DEFERRED         # releases the polecat session
+```
+
+**Exit criteria:** Report generated, anomalies escalated if any, step bead closed."""
 
 [vars]
 [vars.max_age]

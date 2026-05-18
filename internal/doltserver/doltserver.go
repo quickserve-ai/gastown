@@ -2785,6 +2785,147 @@ func CollectDatabaseOwners(townRoot string) map[string]string {
 	return owners
 }
 
+// SyncStatus describes the most recent autopush state for one rig DB,
+// derived from its .beads/push-state.json file.
+type SyncStatus struct {
+	DBName            string    // e.g. "hq", "qcore"
+	BeadsDir          string    // absolute path to the .beads dir we read push-state.json from
+	HasPushState      bool      // false if push-state.json doesn't exist (never autopushed)
+	LastPush          time.Time // most recent push attempt (success or failure)
+	LastSuccess       time.Time // most recent SUCCESSFUL push; zero if never recorded or never tracked
+	FailureStreak     int       // consecutive failures since last success
+	LastFailureReason string    // error message from the most recent failure
+}
+
+// Severity classifies the urgency of the sync state.
+// 0 = ok, 1 = warn, 2 = alert. Used by gt dolt status to colour-code the output.
+//
+// Note: bd autopush only began tracking LastSuccess / FailureStreak after the
+// hq-8nkpj4 fix shipped. Files written by older bd versions report zeros for
+// those fields even when actively stalled — fall back to LastPush age in that
+// case so historical state isn't reported as healthy.
+func (s *SyncStatus) Severity() int {
+	if !s.HasPushState {
+		return 0 // unknown / never autopushed — neutral, not an alert
+	}
+	if s.FailureStreak >= 10 {
+		return 2
+	}
+	if s.FailureStreak > 0 {
+		return 1
+	}
+	// Fall back to LastPush age when failure tracking is absent or zero.
+	// Autopush fires after each bd write; a healthy clone pushes within minutes.
+	age := time.Since(s.LastPush)
+	switch {
+	case age > 6*time.Hour:
+		return 2
+	case age > 1*time.Hour:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// CollectSyncStatus walks the same .beads directories as CollectDatabaseOwners
+// and reads each push-state.json. Returns a map keyed by DB name. Databases
+// that have a .beads dir but no push-state.json are still present in the map
+// (HasPushState=false) — that signals "never autopushed" rather than "unknown."
+func CollectSyncStatus(townRoot string) map[string]*SyncStatus {
+	statuses := make(map[string]*SyncStatus)
+
+	addStatus := func(dbName, beadsDir string) {
+		if dbName == "" || beadsDir == "" {
+			return
+		}
+		if _, already := statuses[dbName]; already {
+			return
+		}
+		statuses[dbName] = readPushStateFile(dbName, beadsDir)
+	}
+
+	// Town beads (hq)
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if db := readExistingDoltDatabase(townBeadsDir); db != "" {
+		addStatus(db, townBeadsDir)
+	}
+
+	// Rigs from rigs.json
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	if data, err := os.ReadFile(rigsPath); err == nil {
+		var config struct {
+			Rigs map[string]interface{} `json:"rigs"`
+		}
+		if err := json.Unmarshal(data, &config); err == nil {
+			for rigName := range config.Rigs {
+				beadsDir := FindRigBeadsDir(townRoot, rigName)
+				if beadsDir == "" {
+					continue
+				}
+				if db := readExistingDoltDatabase(beadsDir); db != "" {
+					addStatus(db, beadsDir)
+				}
+			}
+		}
+	}
+
+	// Top-level directories — catches rigs not listed in rigs.json (e.g. atomize)
+	if entries, err := os.ReadDir(townRoot); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Name() == ".beads" || entry.Name() == "mayor" {
+				continue
+			}
+			beadsDir := filepath.Join(townRoot, entry.Name(), ".beads")
+			if db := readExistingDoltDatabase(beadsDir); db != "" {
+				addStatus(db, beadsDir)
+			}
+			rigBeadsDir := filepath.Join(townRoot, entry.Name(), "mayor", "rig", ".beads")
+			if db := readExistingDoltDatabase(rigBeadsDir); db != "" {
+				addStatus(db, rigBeadsDir)
+			}
+		}
+	}
+
+	return statuses
+}
+
+// readPushStateFile reads one push-state.json file. Missing file → HasPushState=false.
+// Corrupt or unreadable file → HasPushState=true with zero fields (treat as untracked).
+func readPushStateFile(dbName, beadsDir string) *SyncStatus {
+	s := &SyncStatus{DBName: dbName, BeadsDir: beadsDir}
+	path := filepath.Join(beadsDir, "push-state.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return s
+	}
+	s.HasPushState = true
+	if err != nil {
+		return s
+	}
+	var raw struct {
+		LastPush          string `json:"last_push"`
+		LastSuccess       string `json:"last_success"`
+		FailureStreak     int    `json:"failure_streak"`
+		LastFailureReason string `json:"last_failure_reason"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return s
+	}
+	if raw.LastPush != "" {
+		if t, err := time.Parse(time.RFC3339, raw.LastPush); err == nil {
+			s.LastPush = t
+		}
+	}
+	if raw.LastSuccess != "" {
+		if t, err := time.Parse(time.RFC3339, raw.LastSuccess); err == nil {
+			s.LastSuccess = t
+		}
+	}
+	s.FailureStreak = raw.FailureStreak
+	s.LastFailureReason = raw.LastFailureReason
+	return s
+}
+
 // RemoveDatabase removes an orphaned database directory from .dolt-data/.
 // The caller should verify the database is actually orphaned before calling this.
 // If the Dolt server is running, it will DROP the database first.

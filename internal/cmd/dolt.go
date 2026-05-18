@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -743,6 +744,26 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\n  %s %s\n",
 				style.Bold.Render("!!!"),
 				style.Bold.Render("SERVER IS READ-ONLY — run 'gt dolt recover' to restart"))
+		}
+
+		// Sync status — surfaces stalled autopush across rig DBs (hq-8nkpj4 visibility fix).
+		// Without this, persistent autopush failures only show as stderr warnings that
+		// agent-invoked bd commands swallow. Operators learn about divergence when writes
+		// start blocking on merge conflicts (40k commits later), not when sync first stalls.
+		syncStatuses := doltserver.CollectSyncStatus(townRoot)
+		if len(syncStatuses) > 0 {
+			fmt.Printf("\n  %s\n", style.Bold.Render("Sync Status:"))
+			// Sort by DB name for stable output.
+			dbNames := make([]string, 0, len(syncStatuses))
+			for db := range syncStatuses {
+				dbNames = append(dbNames, db)
+			}
+			sort.Strings(dbNames)
+			for _, db := range dbNames {
+				s := syncStatuses[db]
+				marker, summary := formatSyncStatus(s)
+				fmt.Printf("    %s %-20s %s\n", marker, db, summary)
+			}
 		}
 
 		// Verify all filesystem databases are actually served.
@@ -2155,4 +2176,58 @@ func runDoltBackupReset(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return nil
+}
+
+// formatSyncStatus turns a doltserver.SyncStatus into a marker (●/○/⚠/✗) and
+// a one-line summary suitable for gt dolt status output.
+func formatSyncStatus(s *doltserver.SyncStatus) (marker, summary string) {
+	if !s.HasPushState {
+		return style.Dim.Render("○"), style.Dim.Render("never autopushed (no push-state.json)")
+	}
+
+	sev := s.Severity()
+	switch sev {
+	case 0:
+		marker = style.Bold.Render("●")
+	case 1:
+		marker = style.Bold.Render("⚠")
+	default:
+		marker = style.Bold.Render("✗")
+	}
+
+	parts := []string{}
+	if s.FailureStreak > 0 {
+		parts = append(parts, fmt.Sprintf("%d consecutive failures", s.FailureStreak))
+	}
+	if !s.LastPush.IsZero() {
+		parts = append(parts, fmt.Sprintf("last attempt %s ago", formatAgeShort(time.Since(s.LastPush))))
+	}
+	if !s.LastSuccess.IsZero() {
+		parts = append(parts, fmt.Sprintf("last success %s ago", formatAgeShort(time.Since(s.LastSuccess))))
+	}
+	if s.LastFailureReason != "" {
+		parts = append(parts, fmt.Sprintf("reason: %s", s.LastFailureReason))
+	}
+	if len(parts) == 0 {
+		return marker, "in-sync"
+	}
+	summary = strings.Join(parts, "; ")
+	if sev == 0 {
+		summary = "in-sync (" + summary + ")"
+	}
+	return marker, summary
+}
+
+// formatAgeShort renders a duration as a compact human string: "12m", "3h", "5d".
+func formatAgeShort(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }

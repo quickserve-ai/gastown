@@ -96,3 +96,15 @@ CLAUDE.local.md
 
 # Fork research notes (private — not for public upstream)
 docs/fork-info/
+
+# bd-generated git hooks (auto-installed by `bd hooks install`; regenerated per clone)
+.githooks/post-checkout
+.githooks/post-merge
+.githooks/pre-commit
+.githooks/prepare-commit-msg
+
+# bd local version pin
+.local_version
+
+# Stale embedded-dolt experiment artifact
+embeddeddolt/

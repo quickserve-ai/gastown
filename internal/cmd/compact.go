@@ -281,9 +281,15 @@ func runCompact(cmd *cobra.Command, args []string) error {
 // but leaves behind its dependency records (bd delete has no cascade logic for
 // the wisp-level tables). Runs as a post-compact sweep.
 func cleanOrphanedWispDeps(bd *beads.Beads, result *compactResult) {
+	// Source (issue_id) must always be a known wisp. Target depends on the typed
+	// column populated for the row: wisp-target rows have depends_on_wisp_id and
+	// must reference a known wisp; issue-target rows must reference a known issue;
+	// external-target rows have no FK to check (orphan-cleanup only applies to
+	// the FK-checkable target types).
 	const q = `DELETE FROM wisp_dependencies WHERE ` +
 		`NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.issue_id) ` +
-		`OR NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.depends_on_id)`
+		`OR (wisp_dependencies.depends_on_wisp_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = wisp_dependencies.depends_on_wisp_id)) ` +
+		`OR (wisp_dependencies.depends_on_issue_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM issues WHERE id = wisp_dependencies.depends_on_issue_id))`
 	out, err := bd.Run("sql", q)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("orphaned wisp_deps cleanup: %v", err))

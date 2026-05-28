@@ -483,30 +483,40 @@ func runBdJSON(dir string, args ...string) ([]byte, error) {
 // target issues live in a different Dolt database. See GH #2624.
 //
 // dir should be the town beads directory (.beads) for HQ queries.
-// direction is "down" (issue_id → depends_on_id) or "up" (depends_on_id → issue_id).
+// direction is "down" (issue_id → typed target) or "up" (typed target → issue_id).
 // depType filters by dependency type (e.g., "tracks", "blocks"); empty means all types.
 //
 // Returns deduplicated, unwrapped issue IDs (external:prefix:id → id).
+//
+// Post-migration the polymorphic depends_on_id has been split into three typed
+// target columns (depends_on_issue_id / depends_on_wisp_id / depends_on_external),
+// exactly one non-null per row. "down" COALESCEs the three to recover the target
+// value; "up" matches the bead ID against any of the three typed columns.
 func bdDepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
-	// Determine query columns based on direction.
-	// "down": issueID depends on targets → SELECT depends_on_id WHERE issue_id = ?
-	// "up":   issueID is depended on → SELECT issue_id WHERE depends_on_id = ?
-	var selectCol, whereCol string
-	if direction == "up" {
-		selectCol = "issue_id"
-		whereCol = "depends_on_id"
-	} else {
-		selectCol = "depends_on_id"
-		whereCol = "issue_id"
-	}
-
-	// Build SQL query. Bead IDs are system-generated alphanumeric strings
-	// with hyphens and dots — validate to prevent injection.
+	// Bead IDs are system-generated alphanumeric strings with hyphens and dots —
+	// validate to prevent injection.
 	if !isValidBeadID(issueID) {
 		return nil, fmt.Errorf("invalid bead ID: %q", issueID)
 	}
 
-	query := fmt.Sprintf("SELECT %s FROM dependencies WHERE %s = '%s'", selectCol, whereCol, issueID)
+	// Build SQL query per direction.
+	// selectCol is the row-map key the caller uses to read out IDs.
+	var selectCol, query string
+	if direction == "up" {
+		selectCol = "issue_id"
+		// issueID is the target — find rows where ANY typed target column matches it.
+		query = fmt.Sprintf(
+			"SELECT issue_id FROM dependencies WHERE (depends_on_issue_id = '%s' OR depends_on_wisp_id = '%s' OR depends_on_external = '%s')",
+			issueID, issueID, issueID,
+		)
+	} else {
+		selectCol = "target_id"
+		// "down": list target IDs (any typed column) for this source issueID.
+		query = fmt.Sprintf(
+			"SELECT COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS target_id FROM dependencies WHERE issue_id = '%s'",
+			issueID,
+		)
+	}
 	if depType != "" {
 		if !isValidBeadID(depType) {
 			return nil, fmt.Errorf("invalid dep type: %q", depType)

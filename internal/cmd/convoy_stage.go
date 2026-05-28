@@ -1540,9 +1540,10 @@ func bdListChildrenViaDeps(parentID string) ([]bdShowResult, error) {
 		return nil, nil
 	}
 
-	// Production data stores parent-child as (issue_id=parent, depends_on_id=child).
-	// "down" returns depends_on_id rows where issue_id = parentID — i.e., the
-	// epic's children. See `bd dep list <epic>` in the bug report.
+	// Production data stores parent-child as (issue_id=parent, typed child target).
+	// "down" returns target IDs (any of depends_on_issue_id / wisp_id / external,
+	// COALESCEd by bdDepListRawIDs) where issue_id = parentID — i.e., the epic's
+	// children. See `bd dep list <epic>` in the bug report.
 	childIDs, err := bdDepListRawIDs(beadsDir, parentID, "down", "parent-child")
 	if err != nil {
 		return nil, nil // best-effort — caller still gets the empty primary result

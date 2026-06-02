@@ -193,3 +193,87 @@ launchd agent comes up empty and the login keychain stays locked until a GUI
 login, so the syncer cannot auth. This is not silent (the auth-probe files a
 bead). HTTPS + a fine-grained PAT is the documented fallback if unattended-reboot
 sync ever becomes a hard requirement.
+
+## The Single-Remote-Op Invariant (2026-06-02, hq-crzriu re-enable gate)
+
+> **Status: design — mayor gate (b).** Written by Woodhouse during the 2.1.1
+> crash-watch. The mayor holds syncer + 3-plugin re-enable until BOTH (a)
+> crash-stability confirmed on 2.1.1 past ~16:30 AND (b) this invariant blessed.
+> This section IS gate (b). The point of single-syncer is worth nothing if a
+> *second* actor still touches a shared Dolt remote concurrently — that second
+> actor is exactly the manifest-race that corrupts the chunk store (§Problem).
+
+### Invariant (one sentence)
+
+> **At any instant, for any shared Dolt remote, at most one process is
+> performing a chunk-store remote op (`fetch`/`pull`/`push`), and that process
+> is the designated single-syncer LaunchAgent.**
+
+Local commits to the shared 3307 server are unrestricted — every agent sees
+them instantly via the server, *without* federation. The invariant constrains
+only ops that talk to a GitHub remote (the corruptible manifest).
+
+### Every remote-op vector, enumerated, with closure
+
+The whole job of gate (b) is to prove the enumeration is *complete* — a vector
+we forget is a vector that re-corrupts the remote. Audited 2026-06-02:
+
+| # | Vector | Mechanism | Touches Dolt remote? | Closure (current) |
+|---|--------|-----------|----------------------|-------------------|
+| 1 | **Single-syncer LaunchAgent** | `gt dolt pull` → integrity → `gt dolt sync` (server-side `CALL DOLT_PULL/PUSH`), serialized, lock-guarded | **YES — the one allowed** | PAUSED (`launchctl bootout`); the sole sanctioned op when re-enabled |
+| 2 | **`bd` autopush** (inline + gt-8cy3 detached worker) | `maybeAutoPush` forks `bd dolt _autopush-worker`; fires on every write when a Dolt remote exists | YES | `dolt.auto-push: false` in **all** shared configs. hq/qcore/xtm had it; **gastown was open in 4 of 5 contexts** (woodhouse, refinery/rig, barry-s9w7z, barry-omp-fix) — **closed 2026-06-02 this session**; mayor/rig already had it |
+| 3 | **crosstown-sync plugin** | `run.sh` → `gt dolt pull --db X` (server-side fetch) on a 10m cooldown gate | YES | gate=`manual` across town + all dog/rig copies; runtime symlink dropped (bridge source intact) |
+| 4 | **dolt-archive plugin** | remote op on cooldown gate | YES | gate=`manual` across all copies |
+| 5 | **dolt-backup plugin** | remote op on cooldown gate | YES | gate=`manual` across all copies |
+| 6 | **daemon `dolt_backup` patrol** | `mayor/daemon.json` → 2h interval | YES (to *backup* remote) | **enabled in daemon.json** but inert via rig-level `backup.enabled: false` (gt-yuhb). ⚠ Gate is at the wrong layer — see Fragile Gates below |
+| 7 | **daemon `jsonl_git_backup` patrol** | 15m, pushes JSONL export to the *project git* repo | NO — git repo, not the Dolt chunk store; cannot race the Dolt manifest | left enabled; out of scope for this invariant |
+| 8 | **manual `gt dolt sync` / `bd dolt push`** by any agent | human/agent runs it directly | YES | policy only — "only the designated syncer pushes." Documented in CLAUDE.md Dolt core; not machine-enforced |
+| 9 | **moshi-hooks** (SessionStart/Stop/PreToolUse/PostToolUse/SubagentStop) | `bunx moshi-hooks` on every lifecycle event | **NO** | moshi-hooks 1.1.1 is a telemetry/observability dispatcher (`setup`/`token` only — phones home to its API). It does **not** run `xtm sync`, `dolt pull`, or any Dolt remote op. The mayor flagged this as the "session-start sync vector"; audit shows it is **benign for Dolt** — recorded here so we don't re-litigate |
+| 10 | **Stop hook `bd sync`** | `~/.claude/settings.json` Stop hook | NO | `bd sync` is **not a command** (`unknown command "sync"`); the hook errors and is swallowed by `|| true`. Inert |
+
+**Conclusion of the audit:** the only vector that was actually open after the
+mayor's plugin/syncer mitigations was **#2 on the gastown DB** (4 crew/rig
+configs defaulting autopush ON). That is now closed. With the syncer paused,
+the live remote-op count for every shared remote is **zero**; on re-enable it
+becomes **exactly one** (the LaunchAgent). The session-start vector the mayor
+worried about (#9) is real as a *hook* but does no Dolt remote op.
+
+### Fragile gates (hardening follow-ups, not re-enable blockers)
+
+- **#6 daemon `dolt_backup` is gated at the wrong layer.** It is `enabled: true`
+  in `mayor/daemon.json` and stays inert *only* because every rig config carries
+  `backup.enabled: false`. A single rig clone created without that line silently
+  re-arms a 2h remote op. Correct fix: set `dolt_backup.enabled: false` in
+  `mayor/daemon.json` so the gate lives at the daemon, not scattered across N
+  rig configs. (Follow-up bead — safe to do now; does not re-enable anything.)
+- **#2 autopush default is upstream-wrong.** `isDoltAutoPushEnabled` defaults ON
+  whenever a remote exists. Every new clone re-opens vector #2 until someone
+  remembers the flag. The durable fix is the upstream PR (Phase 5) flipping the
+  default to off; until then, single-syncer correctness depends on a config line
+  no one forgets. Track per-clone.
+- **#8 + #3 are policy/gate, not locks.** By design (§"What we do NOT do" —
+  no app-level mutex). Acceptable because the syncer serializes its own ops and
+  the integrity guard refuses to push a dangling reference; a stray manual push
+  is caught by the same guard rather than a lock.
+
+### Re-enable checklist (the mayor's gate, made concrete)
+
+Re-enable ONLY when **both** hold:
+
+1. **Crash-stability (gate a):** PID 30117 (Dolt 2.1.1) survives past ~16:30
+   with no silent death — clears the ~hourly 12:45/14:06/15:05 cadence.
+2. **Invariant blessed (gate b):** this section, plus the audit above showing
+   every vector closed (esp. #2 gastown, now done).
+
+Then, in order:
+1. `gt plugin sync` — restores crosstown-sync / dolt-archive / dolt-backup
+   from gate=`manual`. **Before flipping their gates back**, confirm their
+   cooldown-driven remote ops won't run concurrently with the LaunchAgent's
+   `:X0` marks — stagger or leave the pull-plugins gated if the syncer already
+   covers their DBs (the syncer's `gt dolt pull` makes crosstown-sync redundant
+   for managed DBs).
+2. Re-bootstrap the LaunchAgent: `launchctl bootstrap gui/$(id -u)
+   ~/Library/LaunchAgents/com.woodhouse.gt-dolt-syncer.plist` (RunAtLoad=false,
+   so it waits for the next `:X0`).
+3. Watch `~/.local/state/gt-dolt-syncer/runs.log` + `status.json` for one clean
+   cycle per managed DB (currently `xtm` + `gastown`; `qcore`/`hq` stay held).

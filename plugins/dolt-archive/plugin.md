@@ -4,7 +4,7 @@ description = "Offsite backup: JSONL snapshots to git, dolt push to GitHub/DoltH
 version = 1
 
 [gate]
-type = "cooldown"
+type = "manual"
 duration = "1h"
 
 [tracking]

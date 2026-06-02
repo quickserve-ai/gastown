@@ -4,7 +4,7 @@ description = "Smart Dolt database backup with change detection"
 version = 2
 
 [gate]
-type = "cooldown"
+type = "manual"
 duration = "15m"
 
 [tracking]

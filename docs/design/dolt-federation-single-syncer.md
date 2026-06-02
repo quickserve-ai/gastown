@@ -178,8 +178,14 @@ a P2 bead, deduped by a per-kind marker file and self-cleared on recovery:
 - integrity-guard failure → push blocked + bead.
 - push failure → per-DB streak counter; bead after 3 consecutive.
 
-**Managed set.** Currently `xtm` + `gastown` (both verified end-to-end under
-launchd: pull→integrity→push clean, 0 ahead of origin after). Held out:
+**Managed set.** `DBS=(gastown)` as of the 2026-06-02 post-2.1.1 interim
+re-enable (mayor gate-b SIGNED on the gastown-only path; both a manual kickstart
+and the natural `:40` launchd tick verified clean: pull→integrity→push, 1 pushed,
+0 ahead after, Dolt healthy throughout). Held out:
+- `xtm` — until vector #11's bridge pull-only fix ships (see row 11). `xtm` was
+  in the morning's as-built `DBS` but is removed in the interim because
+  `xtm inbox`/`send` auto-push the xtm remote from every agent in both towns — a
+  syncer xtm-push would be the forbidden second pusher. Rejoins on the bridge fix.
 - `qcore` — until gt-76og origin chunk-store repair.
 - `hq` — until a one-time backlog drain (gt-loz4). On 2026-06-02 hq was 1185
   commits / 29 days behind; pushing that backlog spiked the server to ~11.2 GB

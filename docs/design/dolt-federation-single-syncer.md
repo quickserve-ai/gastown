@@ -1,8 +1,9 @@
 # Dolt Federation: Single-Syncer + Pre-Push Integrity
 
-> **Status: Proposed** — author Woodhouse, 2026-04-23. Waiting on Navani response
-> (xt-sbj) to finalize cross-town cadence. Implementation can start on the
-> integrity-check half without her input.
+> **Status: Implemented (v1)** — author Woodhouse, 2026-04-23; built & deployed
+> 2026-06-02 (hq-crzriu, mayor greenlight hq-wisp-mmcm9; Cherub chose keychain
+> auth, hq-wisp-0de5v). The as-built shape is in "## Implementation (as built)"
+> at the end of this doc; the sections below are the original design rationale.
 
 ## Problem
 
@@ -130,3 +131,65 @@ Phases 2, 3, 5 can proceed immediately. Phases 4, 6 wait on Navani.
 - Do not attempt to repair corrupt remotes automatically. That's a manual
   procedure (gh API to delete `refs/dolt/data`, local gc, re-push) done by the
   designated syncer when escalated.
+
+## Implementation (as built, 2026-06-02)
+
+Built as a macOS launchd LaunchAgent rather than a cron job, specifically to
+solve the auth half of the problem (the original design left auth unspecified).
+
+**Auth — the key insight.** The whole churn-crash (hq-crzriu) and corruption
+(gt-76og) traced to one thing: ad-hoc remote ops running in contexts with **no
+ssh-agent** (cron, detached agents, `bd` autopush) failed `publickey`, retried,
+and churned connections until the server crashed. The fix is to run the one
+syncer in a context that *has* the agent. On macOS, a LaunchAgent loaded into
+the user's **Aqua (GUI) domain** (`gui/<uid>`) inherits the per-user launchd
+ssh-agent (`SSH_AUTH_SOCK=/private/tmp/com.apple.launchd.*/Listeners`) that
+already holds `id_ed25519` — the same agent the Dolt SQL server itself uses for
+its server-side `CALL DOLT_PUSH`. `ssh-add --apple-use-keychain` reloads the key
+from the login keychain so it survives reboot once the GUI session unlocks the
+keychain. This is also why Barry's qcore push failed and is now moot: he just
+commits locally; the syncer pushes.
+
+**Artifacts:**
+- `~/.local/bin/gt-dolt-syncer` — the cycle script (serialized, lock-guarded).
+- `~/Library/LaunchAgents/com.woodhouse.gt-dolt-syncer.plist` — Aqua-domain
+  agent; `StartCalendarInterval` on `:00/:10/:20/:30/:40/:50` (Gas Town's even
+  tens; Alex's town staggered onto `:05/:15/...`). `RunAtLoad=false`.
+- `~/.local/state/gt-dolt-syncer/` — `runs.log`, `status.json`, alert markers.
+
+**The cycle**, per managed DB, one remote op at a time:
+`gt dolt pull --db X` → integrity guard → `gt dolt sync --db X`. Both `gt dolt`
+verbs route through the running server (`CALL DOLT_PULL`/`CALL DOLT_PUSH`) so the
+server stays up. The script `cd`s into a Gas Town workspace first — launchd
+starts at `/`, and `gt`/`bd` resolve config from CWD.
+
+**Integrity guard (v1, deliberately lightweight).** A full §2 noms HEAD-graph
+walk is the documented beads-Go follow-up. v1 is a lock-safe server-side
+commit-graph walk: `select count(*) from dolt_log`. It reads every commit chunk
+and errors on a dangling reference (the v3→v4→v5 propagation mode), runs in ~1s
+even on the 8.6 GB hq DB, and doesn't contend with the server. A full
+`dolt fsck` was rejected for the cycle — it ran **>5 min** on hq, far too heavy
+to repeat every 10 min. It does NOT verify table-data chunks; that gap is the
+follow-up.
+
+**No silent stalls (mayor's requirement).** Failures are made visible by filing
+a P2 bead, deduped by a per-kind marker file and self-cleared on recovery:
+- auth-probe failure (the post-reboot locked-keychain stall) → bead.
+- integrity-guard failure → push blocked + bead.
+- push failure → per-DB streak counter; bead after 3 consecutive.
+
+**Managed set.** Currently `xtm` + `gastown` (both verified end-to-end under
+launchd: pull→integrity→push clean, 0 ahead of origin after). Held out:
+- `qcore` — until gt-76og origin chunk-store repair.
+- `hq` — until a one-time backlog drain (gt-loz4). On 2026-06-02 hq was 1185
+  commits / 29 days behind; pushing that backlog spiked the server to ~11.2 GB
+  RSS (baseline ~7.5 GB) and was SIGKILLed with zero progress (Dolt #11087).
+  Retrying every cycle would OOM/jetsam the server — the exact crash this
+  exists to prevent. hq rejoins `DBS` once drained to steady state, after which
+  each cycle pushes only minutes of new mail/beads (cheap).
+
+**Known limitation (accepted by Cherub).** On an *unattended* reboot the
+launchd agent comes up empty and the login keychain stays locked until a GUI
+login, so the syncer cannot auth. This is not silent (the auth-probe files a
+bead). HTTPS + a fine-grained PAT is the documented fallback if unattended-reboot
+sync ever becomes a hard requirement.

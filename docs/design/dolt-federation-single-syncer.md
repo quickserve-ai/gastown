@@ -178,15 +178,13 @@ a P2 bead, deduped by a per-kind marker file and self-cleared on recovery:
 - integrity-guard failure → push blocked + bead.
 - push failure → per-DB streak counter; bead after 3 consecutive.
 
-**Managed set.** `DBS=(gastown)` as of the 2026-06-02 post-2.1.1 interim
-re-enable (mayor gate-b SIGNED on the gastown-only path; both a manual kickstart
-and the natural `:40` launchd tick verified clean: pull→integrity→push, 1 pushed,
-0 ahead after, Dolt healthy throughout). Held out:
-- `xtm` — until vector #11's bridge pull-only fix ships (see row 11). `xtm` was
-  in the morning's as-built `DBS` but is removed in the interim because
-  `xtm inbox`/`send` auto-push the xtm remote from every agent in both towns — a
-  syncer xtm-push would be the forbidden second pusher. Rejoins on the bridge fix.
-- `qcore` — until gt-76og origin chunk-store repair.
+**Managed set.** `DBS=(gastown qcore xtm)` as of 2026-06-03. Timeline:
+`gastown` re-enabled 2026-06-02 (post-2.1.1, mayor gate-b SIGNED; manual
+kickstart + natural `:40` tick both verified clean). `qcore` rejoined 2026-06-02
+(gt-76og origin repair + union-replay). `xtm` rejoined 2026-06-03 once vector
+#11's bridge pull-only fix shipped (PR #10) — pushed only on even-ten marks per
+the cross-town stagger (see the stagger note in the re-enable section). Still
+held out:
 - `hq` — until a one-time backlog drain (gt-loz4). On 2026-06-02 hq was 1185
   commits / 29 days behind; pushing that backlog spiked the server to ~11.2 GB
   RSS (baseline ~7.5 GB) and was SIGKILLed with zero progress (Dolt #11087).
@@ -236,10 +234,12 @@ we forget is a vector that re-corrupts the remote. Audited 2026-06-02:
 | 8 | **manual `gt dolt sync` / `bd dolt push`** by any agent | human/agent runs it directly | YES | policy only — "only the designated syncer pushes." Documented in CLAUDE.md Dolt core; not machine-enforced |
 | 9 | **moshi-hooks** (SessionStart/Stop/PreToolUse/PostToolUse/SubagentStop) | `bunx moshi-hooks` on every lifecycle event | **NO** | moshi-hooks 1.1.1 is a telemetry/observability dispatcher (`setup`/`token` only — phones home to its API). It does **not** run `xtm sync`, `dolt pull`, or any Dolt remote op. The mayor flagged this as the "session-start sync vector"; audit shows it is **benign for Dolt** — recorded here so we don't re-litigate |
 | 10 | **Stop hook `bd sync`** | `~/.claude/settings.json` Stop hook | NO | `bd sync` is **not a command** (`unknown command "sync"`); the hook errors and is swallowed by `|| true`. Inert |
-| 11 | **`xtm inbox` / `xtm send` auto-push** | `bridge/bin/xtm`: `inbox` runs `xtm sync` "pull before reading"; `send` runs it twice (pull before, push after). `xtm sync` does pull **AND push** (`gt dolt sync --db xtm` → `CALL DOLT_PUSH` + `git push --force refs/dolt/...`) | **YES — on xtm, a syncer-MANAGED remote** | **OPEN (found by mayor via ps, 2026-06-02 14:56/14:57).** Not a hook — a side-effect of the wrapper CLAUDE.md tells *every agent in both towns* to use. Every cross-town mail check/send pushes the xtm remote. Proposed closure below; needs overseer approval (bridge file, affects Alex's town) |
+| 11 | **`xtm inbox` / `xtm send` auto-push** | `bridge/bin/xtm`: `inbox` runs `xtm sync` "pull before reading"; `send` runs it twice (pull before, push after). `xtm sync` does pull **AND push** (`gt dolt sync --db xtm` → `CALL DOLT_PUSH` + `git push --force refs/dolt/...`) | **YES — on xtm, a syncer-MANAGED remote** | **OPEN (found by mayor via ps, 2026-06-02 14:56/14:57).** Not a hook — a side-effect of the wrapper CLAUDE.md tells *every agent in both towns* to use. Every cross-town mail check/send pushes the xtm remote. Proposed closure below; needs overseer approval (bridge file, affects Alex's town). **CLOSED 2026-06-03 — bridge PR #10 (`fix(xtm): keep routine reads and sends pull-only`, squash 541f403) made `inbox`/`send` pull-only; `xtm sync` kept as the syncer's pull+push path.** |
 
-**Conclusion of the audit:** after the mayor's plugin/syncer mitigations and the
-#2 gastown-autopush closure, **one vector remains open: #11.** The
+**Conclusion of the audit:** after the mayor's plugin/syncer mitigations, the
+#2 gastown-autopush closure, and the #11 bridge pull-only fix (PR #10, shipped
+2026-06-03), **all enumerated vectors are closed.** The (historical) analysis of
+#11 follows. The
 `xtm inbox`/`xtm send` commands auto-invoke `xtm sync`, whose *push* half
 (`gt dolt sync --db xtm`) writes the xtm shared remote. Because every agent in
 *both* towns runs `xtm inbox`/`send` routinely (CLAUDE.md mandates it), the xtm
@@ -248,7 +248,16 @@ xtm-corruption driver, and a direct collision with the syncer's xtm push on
 re-enable. The session-start vector the mayor originally worried about (#9,
 moshi-hooks) is benign; the *real* session-activity vector is #11.
 
-### Vector #11 — `xtm`-wrapper auto-push (proposed closure)
+### Vector #11 — `xtm`-wrapper auto-push (SHIPPED 2026-06-03)
+
+**As-built:** bridge PR #10 (squash `541f403`, branch `alex/xtm-pull-only`,
+authored by Alex's town, co-signed + overseer-approved) implemented the proposed
+closure verbatim: added `xtm pull` / `xtm push` paths; `xtm inbox` and `xtm send`
+now call `xtm pull` (pull + notify, **no push**); `xtm sync` keeps pull+push as
+the single-syncer command; sync/push failures now propagate non-zero for syncer
+supervision; added `test-xtm.sh` (6 regression tests, all green). `xtm` rejoined
+the syncer `DBS` the same day (see managed-set note below). The original analysis
+that motivated the fix is preserved below.
 
 **Why push, not pull, is the problem.** A `dolt fetch`/`pull` is read-only on
 the remote manifest; concurrent pulls don't corrupt it. The incident (§Problem)
@@ -310,13 +319,20 @@ Then, in order:
 3. Watch `~/.local/state/gt-dolt-syncer/runs.log` + `status.json` for one clean
    cycle per managed DB.
 
-**Interim managed set given #11 (recommended).** Until the bridge fix for #11
-lands (overseer + Alex co-sign), **hold `xtm` out of the syncer's `DBS` array**
-and re-enable for **`gastown` only**. Reason: if the syncer pushes xtm while
-agents' `xtm inbox`/`send` also push xtm (#11 still open), that is the forbidden
-two-pusher race on the xtm manifest. Holding xtm means the syncer never pushes
-it, so the agentic auto-push (#11) — while still undesirable — at least has a
-single logical writer per push event rather than colliding with the syncer.
-`gastown` has no equivalent everyday-agentic-push path (autopush now disabled,
-#2), so it is safe to re-enable first. Add `xtm` back to `DBS` the moment #11's
-pull-only fix ships. (`qcore`/`hq` remain held per their own blockers.)
+**Managed set (as-built, 2026-06-03).** `DBS=(gastown qcore xtm)`. History:
+`gastown` re-enabled first (no everyday-agentic-push path; #2 autopush disabled);
+`qcore` rejoined 2026-06-02 (gt-76og origin repair + union-replay); `xtm` rejoined
+2026-06-03 the moment #11's pull-only fix shipped (PR #10). `hq` remains held
+pending its one-time backlog drain (gt-loz4).
+
+**xtm cross-town push stagger.** Because `xtm` is shared with Alex's town, the
+syncer must not push it concurrently with Alex's syncer. Co-signed convention:
+**our town pushes xtm only on EVEN ten-minute marks (:00/:20/:40); Alex's town
+pushes on ODD marks (:10/:30/:50)** — one bounded pusher per town, never
+overlapping. Enforced by `gt-dolt-syncer`'s stagger guard (`STAGGERED_DBS=(xtm)`
++ `is_our_push_window`): on an odd-ten cycle the syncer still pulls xtm
+(read-only, safe every cycle) but **defers the push**, logging `odd-ten mark —
+push deferred to Alex's town`. `gastown`/`qcore` are single-town and push every
+cycle. Alex's xtm cron stays OFF until a coordinated 'go' confirms our bounded
+pusher is live (verified clean cycle 2026-06-03: xtm pull+integrity OK, odd-ten
+deferral correct, controlled even-window push `1 pushed 0 failed`).

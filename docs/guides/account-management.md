@@ -122,6 +122,40 @@ export GT_ACCOUNT=work
 gt sling gp-abc greenplace   # Uses work account
 ```
 
+## Per-Rig Account Settings
+
+A rig's `settings/config.json` can assign accounts by role or by individual
+worker, so agents started without an explicit `--account` flag still land on the
+right account. This is how Claude Code spend is distributed (e.g. polecats on one
+account, persistent crew on another) without anyone passing a flag every time.
+
+```json
+{
+  "type": "rig-settings",
+  "default_account": "personal",
+  "role_accounts":   { "polecat": "personal", "crew": "qconcierge" },
+  "worker_accounts": { "woodhouse": "personal" }
+}
+```
+
+- `default_account` — rig-wide fallback for every agent in the rig.
+- `role_accounts[role]` — per-role override. Roles: `crew`, `polecat`,
+  `witness`, `refinery`, `mayor`.
+- `worker_accounts[name]` — per-named-crew override (highest of the three).
+
+### Resolution priority (highest wins)
+
+1. `GT_ACCOUNT` env var
+2. `--account` flag
+3. `worker_accounts[worker]` (rig settings)
+4. `role_accounts[role]` (rig settings)
+5. `default_account` (rig settings)
+6. `accounts.json` global default
+
+These rig settings are honored by `gt crew start`, `gt start`, `gt crew at`,
+and polecat spawning (including `gt sling`, which resolves
+`role_accounts["polecat"]` at spawn time when no `--account` is given).
+
 ## Shared Commands
 
 When adding an account, `gt account add` symlinks

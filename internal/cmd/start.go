@@ -1032,9 +1032,20 @@ func runStartCrew(cmd *cobra.Command, args []string) error {
 	crewGit := git.NewGit(r.Path)
 	crewMgr := crew.NewManager(r, crewGit)
 
-	// Resolve account for Claude config
+	// Resolve account for Claude config. Mirror `gt crew start` and polecat
+	// spawn: when no --account flag is given, fall back to the rig's per-worker
+	// / per-role / default account settings before the global default
+	// (hq-qruvri). GT_ACCOUNT and the --account flag still win — they are
+	// applied first inside ResolveAccountConfigDir.
+	account := startCrewAccount
+	if account == "" {
+		rigSettingsPath := filepath.Join(r.Path, "settings", "config.json")
+		if rigSettings, loadErr := config.LoadRigSettings(rigSettingsPath); loadErr == nil {
+			account = rigSettings.ResolveAccount("crew", name)
+		}
+	}
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, accountHandle, err := config.ResolveAccountConfigDir(accountsPath, startCrewAccount)
+	claudeConfigDir, accountHandle, err := config.ResolveAccountConfigDir(accountsPath, account)
 	if err != nil {
 		return fmt.Errorf("resolving account: %w", err)
 	}
@@ -1044,7 +1055,7 @@ func runStartCrew(cmd *cobra.Command, args []string) error {
 
 	// Use manager's Start() method - handles workspace creation, settings, and session
 	err = crewMgr.Start(name, crew.StartOptions{
-		Account:         startCrewAccount,
+		Account:         account,
 		ClaudeConfigDir: claudeConfigDir,
 		AgentOverride:   startCrewAgentOverride,
 	})

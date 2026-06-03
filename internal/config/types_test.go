@@ -141,7 +141,7 @@ func TestWebTimeoutsConfig_JSONRoundTrip(t *testing.T) {
 		TmuxCmdTimeout:    "3s",
 		FetchTimeout:      "12s",
 		DefaultRunTimeout: "45s",
-		MaxRunTimeout:      "90s",
+		MaxRunTimeout:     "90s",
 	}
 
 	data, err := json.Marshal(original)
@@ -622,4 +622,48 @@ func TestParseDurationOrDefault_AllWebTimeoutDefaults(t *testing.T) {
 	}
 }
 
+// --- RigSettings.ResolveAccount ---
 
+// TestRigSettingsResolveAccount locks the rig-settings account-resolution
+// priority used by the per-agent account-isolation feature (hq-qruvri /
+// f3a62808c): worker_accounts[worker] > role_accounts[role] > default_account.
+// The CLI --account flag and GT_ACCOUNT env are applied by the callers /
+// ResolveAccountConfigDir above this method, so they are not exercised here.
+func TestRigSettingsResolveAccount(t *testing.T) {
+	t.Parallel()
+
+	full := &RigSettings{
+		DefaultAccount: "rig-default",
+		RoleAccounts:   map[string]string{"crew": "team", "polecat": "personal"},
+		WorkerAccounts: map[string]string{"woodhouse": "personal"},
+	}
+
+	tests := []struct {
+		name     string
+		settings *RigSettings
+		role     string
+		worker   string
+		want     string
+	}{
+		{"worker beats role and default", full, "crew", "woodhouse", "personal"},
+		{"role used when worker has no override", full, "crew", "denali", "team"},
+		{"polecat role", full, "polecat", "", "personal"},
+		{"falls back to default for unknown role", full, "witness", "", "rig-default"},
+		{"falls back to default for empty role/worker", full, "", "", "rig-default"},
+		{"nil receiver is empty", nil, "crew", "woodhouse", ""},
+		{"empty settings is empty", &RigSettings{}, "crew", "woodhouse", ""},
+		{
+			"default-only settings",
+			&RigSettings{DefaultAccount: "only-default"},
+			"crew", "woodhouse", "only-default",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.settings.ResolveAccount(tc.role, tc.worker); got != tc.want {
+				t.Errorf("ResolveAccount(%q, %q) = %q, want %q", tc.role, tc.worker, got, tc.want)
+			}
+		})
+	}
+}

@@ -51,6 +51,39 @@ func TestFormatJSON(t *testing.T) {
 	}
 }
 
+func TestDanglingAnomaly(t *testing.T) {
+	cases := []struct {
+		name        string
+		count       int
+		threshold   int
+		wantAnomaly bool
+	}{
+		{"zero count never flags", 0, 0, false},
+		{"nonzero with zero threshold flags (default behavior preserved)", 5, 0, true},
+		{"cascade baseline below threshold is suppressed", 3197, 5000, false},
+		{"exactly at threshold is suppressed (tolerance is inclusive)", 5000, 5000, false},
+		{"above threshold flags a genuine new leak", 5001, 5000, true},
+		{"zero count with a threshold still does not flag", 0, 5000, false},
+		{"negative threshold behaves like zero (flag any nonzero)", 1, -1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := danglingAnomaly(tc.count, tc.threshold)
+			if (a != nil) != tc.wantAnomaly {
+				t.Fatalf("danglingAnomaly(%d, %d): got anomaly=%v, want %v", tc.count, tc.threshold, a != nil, tc.wantAnomaly)
+			}
+			if a != nil {
+				if a.Type != "dangling_parent_ref" {
+					t.Errorf("anomaly type = %q, want dangling_parent_ref", a.Type)
+				}
+				if a.Count != tc.count {
+					t.Errorf("anomaly count = %d, want %d (must carry the raw count)", a.Count, tc.count)
+				}
+			}
+		})
+	}
+}
+
 func TestParentExcludeJoin(t *testing.T) {
 	joinClause, whereCondition := parentExcludeJoin("testdb")
 

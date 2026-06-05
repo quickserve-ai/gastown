@@ -23,6 +23,8 @@ var (
 	reaperAckAge   string
 	reaperDryRun   bool
 	reaperJSON     bool
+
+	reaperDanglingThreshold int
 )
 
 var reaperCmd = &cobra.Command{
@@ -114,7 +116,7 @@ The Dog uses this to understand the state before deciding what to reap.`,
 				continue
 			}
 
-			result, err := reaper.Scan(db, dbName, maxAge, purgeAge, mailAge, staleAge)
+			result, err := reaper.Scan(db, dbName, maxAge, purgeAge, mailAge, staleAge, reaperDanglingThreshold)
 			db.Close()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: scan error: %v\n", dbName, err)
@@ -354,11 +356,11 @@ Returns counts of closed wisps per category. Use --dry-run to preview.`,
 		}
 
 		type dbResult struct {
-			Database  string `json:"database"`
-			Receipts  int    `json:"receipts_closed"`
-			Dispatches int   `json:"dispatches_closed"`
-			Acks      int    `json:"acks_closed"`
-			DryRun    bool   `json:"dry_run,omitempty"`
+			Database   string `json:"database"`
+			Receipts   int    `json:"receipts_closed"`
+			Dispatches int    `json:"dispatches_closed"`
+			Acks       int    `json:"acks_closed"`
+			DryRun     bool   `json:"dry_run,omitempty"`
 		}
 
 		var results []dbResult
@@ -578,7 +580,7 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			}
 
 			// Scan
-			scanResult, err := reaper.Scan(db, dbName, maxAge, purgeAge, mailAge, staleAge)
+			scanResult, err := reaper.Scan(db, dbName, maxAge, purgeAge, mailAge, staleAge, reaperDanglingThreshold)
 			if err != nil {
 				fmt.Printf("%s: scan error: %v\n", dbName, err)
 				db.Close()
@@ -679,6 +681,10 @@ func init() {
 	}
 	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperAutoCloseCmd, reaperRunCmd} {
 		cmd.Flags().StringVar(&reaperStaleAge, "stale-age", "720h", "Max issue staleness before auto-close (30d)")
+	}
+	for _, cmd := range []*cobra.Command{reaperScanCmd, reaperRunCmd} {
+		cmd.Flags().IntVar(&reaperDanglingThreshold, "dangling-threshold", 0,
+			"Surface a dangling_parent_ref anomaly only when the count exceeds this tolerance (0 = flag any nonzero; the raw count is always reported)")
 	}
 
 	reaperClosePluginAcksCmd.Flags().StringVar(&reaperAckAge, "ack-age", "1h", "Max plugin ack/receipt age before closing")

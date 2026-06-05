@@ -99,13 +99,17 @@ func DiscoverDatabases(host string, port int) []string {
 
 // ScanResult holds the results of scanning a database for reaper candidates.
 type ScanResult struct {
-	Database        string    `json:"database"`
-	ReapCandidates  int       `json:"reap_candidates"`
-	PurgeCandidates int       `json:"purge_candidates"`
-	MailCandidates  int       `json:"mail_candidates"`
-	StaleCandidates int       `json:"stale_candidates"`
-	OpenWisps       int       `json:"open_wisps"`
-	Anomalies       []Anomaly `json:"anomalies,omitempty"`
+	Database        string `json:"database"`
+	ReapCandidates  int    `json:"reap_candidates"`
+	PurgeCandidates int    `json:"purge_candidates"`
+	MailCandidates  int    `json:"mail_candidates"`
+	StaleCandidates int    `json:"stale_candidates"`
+	OpenWisps       int    `json:"open_wisps"`
+	// DanglingParentRefs is the raw count of parent-child wisp_dependencies rows
+	// whose target no longer resolves. Always exposed as data (transport),
+	// independent of whether it crossed the surfacing threshold below.
+	DanglingParentRefs int       `json:"dangling_parent_refs"`
+	Anomalies          []Anomaly `json:"anomalies,omitempty"`
 }
 
 // ReapResult holds the results of a reap operation.
@@ -226,7 +230,28 @@ func HasReaperSchema(db *sql.DB) (bool, error) {
 }
 
 // Scan counts reaper candidates in a database without modifying anything.
-func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssueAge time.Duration) (*ScanResult, error) {
+// danglingAnomaly returns a dangling_parent_ref Anomaly when the count exceeds
+// the configured surfacing threshold, or nil when it is within tolerance.
+//
+// The threshold is a configurable operating tolerance — the same philosophy as
+// the open-wisp alert_threshold: a standing benign count below it (e.g. the
+// gt-o5z4 cascade-down artifact, ~3,200 orphaned parent-child rows) is real
+// data but not worth flagging as an anomaly every cycle. Keeping the gate here
+// (transport) makes suppression deterministic regardless of which Dog runs the
+// cycle, rather than relying on each Dog to honor a prose contract (cognition).
+// A threshold <= 0 preserves the original behavior: flag any nonzero count.
+func danglingAnomaly(count, threshold int) *Anomaly {
+	if count <= 0 || count <= threshold {
+		return nil
+	}
+	return &Anomaly{
+		Type:    "dangling_parent_ref",
+		Message: fmt.Sprintf("%d wisp(s) have parent dependency records pointing to purged/missing parents", count),
+		Count:   count,
+	}
+}
+
+func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssueAge time.Duration, danglingThreshold int) (*ScanResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultQueryTimeout)
 	defer cancel()
 
@@ -311,12 +336,13 @@ func Scan(db *sql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleIssue
 			OR (wd.depends_on_issue_id IS NOT NULL AND pi.id IS NULL)
 		)`
 	var danglingCount int
-	if err := db.QueryRowContext(ctx, danglingQuery).Scan(&danglingCount); err == nil && danglingCount > 0 {
-		result.Anomalies = append(result.Anomalies, Anomaly{
-			Type:    "dangling_parent_ref",
-			Message: fmt.Sprintf("%d wisp(s) have parent dependency records pointing to purged/missing parents", danglingCount),
-			Count:   danglingCount,
-		})
+	if err := db.QueryRowContext(ctx, danglingQuery).Scan(&danglingCount); err == nil {
+		// Always expose the raw count (transport); surface it as an anomaly only
+		// when it exceeds the configured tolerance (see danglingAnomaly).
+		result.DanglingParentRefs = danglingCount
+		if a := danglingAnomaly(danglingCount, danglingThreshold); a != nil {
+			result.Anomalies = append(result.Anomalies, *a)
+		}
 	}
 
 	return result, nil

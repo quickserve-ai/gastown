@@ -22,6 +22,11 @@ const (
 	// Alert threshold: if open wisp count exceeds this, the Dog should escalate.
 	// Bumped from 500 → 600 to match cmd/reaper.go threshold (steady-state ~525-533).
 	wispAlertThreshold = 600
+	// Dangling-parent-ref tolerance: below this, `gt reaper scan` does not surface
+	// the dangling_parent_ref anomaly. Set above the ~3,200 gt-o5z4 cascade-down
+	// baseline so the static benign artifact stops paging every cycle, while a
+	// genuine new wisp-lifecycle leak (count climbing past the gate) still surfaces.
+	danglingRefThreshold = 5000
 	// Closed mail older than this is permanently deleted. Formula var: mail_delete_age.
 	defaultMailDeleteAge = 7 * 24 * time.Hour
 	// Issues stale longer than this are auto-closed. Formula var: stale_issue_age.
@@ -88,12 +93,13 @@ func (d *Daemon) reapWisps() {
 	deleteAge := wispDeleteAge(d.patrolConfig)
 
 	vars := map[string]string{
-		"max_age":         maxAge.String(),
-		"purge_age":       deleteAge.String(),
-		"stale_issue_age": defaultStaleIssueAge.String(),
-		"mail_delete_age": defaultMailDeleteAge.String(),
-		"alert_threshold": fmt.Sprintf("%d", wispAlertThreshold),
-		"dolt_port":       fmt.Sprintf("%d", d.doltServerPort()),
+		"max_age":            maxAge.String(),
+		"purge_age":          deleteAge.String(),
+		"stale_issue_age":    defaultStaleIssueAge.String(),
+		"mail_delete_age":    defaultMailDeleteAge.String(),
+		"alert_threshold":    fmt.Sprintf("%d", wispAlertThreshold),
+		"dangling_threshold": fmt.Sprintf("%d", danglingRefThreshold),
+		"dolt_port":          fmt.Sprintf("%d", d.doltServerPort()),
 	}
 
 	if config.DryRun {

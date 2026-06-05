@@ -23,6 +23,7 @@ This is infrastructure cleanup work:
 | stale_issue_age | config | Max issue staleness before auto-close (default 30d) |
 | mail_delete_age | config | Max closed mail age before purging (default 7d) |
 | alert_threshold | config | Open wisp count that triggers escalation (default 500) |
+| dangling_threshold | config | Dangling-parent-ref count tolerance; below this the anomaly is not surfaced (default 5000, above the gt-o5z4 cascade baseline) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
 | dolt_port | config | Dolt server port (default 3307) |
@@ -81,6 +82,7 @@ Or use configured database list from {{databases}} variable.
 gt reaper scan --db=<name> --port={{dolt_port}} \\
   --max-age={{max_age}} --purge-age={{purge_age}} \\
   --mail-age={{mail_delete_age}} --stale-age={{stale_issue_age}} \\
+  --dangling-threshold={{dangling_threshold}} \\
   --json
 ```
 
@@ -291,6 +293,10 @@ default = "168h"
 [vars.alert_threshold]
 description = "Open wisp count that triggers escalation warning"
 default = "500"
+
+[vars.dangling_threshold]
+description = "Dangling-parent-ref count tolerance; below this the anomaly is not surfaced by gt reaper scan (default 5000, above the ~3,200 gt-o5z4 cascade baseline so a genuine new lifecycle leak still surfaces)"
+default = "5000"
 
 [vars.dry_run]
 description = "If 'true', report without modifying data"

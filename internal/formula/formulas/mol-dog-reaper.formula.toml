@@ -44,7 +44,18 @@ The Dog should watch for and flag:
 NOT anomalies (do NOT escalate these):
 - Scan/reap count mismatch (scan finds N, reap closes M < N): this is a benign
   race condition — the witness closes wisps for dead sessions concurrently.
-  This is expected behavior, not a bug."""
+  This is expected behavior, not a bug.
+- Standing `dangling_parent_ref` count in hq from the gt-o5z4 cascade-down
+  artifact (known baseline ~3,200 wisps as of 2026-06-04). These are
+  parent-child dependency rows whose parent was purged, leaving the child row
+  behind — pure row-hygiene with zero query/delivery impact. Do NOT escalate
+  this on its own; note the count in the report only. The durable cleanup is
+  tracked in gt-q8lk (wisp compaction + retention). ESCALATE ONLY IF the
+  dangling count climbs materially above the known baseline (e.g. >5,000,
+  suggesting a NEW wisp-lifecycle leak rather than the static cascade
+  artifact), OR a `dangling_parent_ref` anomaly appears in a database OTHER
+  than hq, OR it coincides with Dolt degradation (`gt dolt status` latency
+  > 100ms). A healthy Dolt + a stable ~baseline count = benign, report-only."""
 formula = "mol-dog-reaper"
 version = 2
 
@@ -75,8 +86,11 @@ gt reaper scan --db=<name> --port={{dolt_port}} \\
 
 **3. Inspect results for anomalies:**
 - Check the `anomalies` array in the JSON output
-- Flag any `dangling_parent_ref` anomalies — these indicate wisps with
-  parent dependency records pointing to purged/missing parents
+- `dangling_parent_ref` anomalies indicate wisps with parent dependency records
+  pointing to purged/missing parents. Filter these against the "NOT anomalies"
+  contract above — the standing hq cascade baseline (~3,200) is benign and
+  report-only; flag for escalation ONLY a material climb above baseline, a
+  non-hq database, or coincident Dolt degradation
 - If `open_wisps` exceeds {{alert_threshold}}, escalate
 
 **4. Decide whether to proceed:**
@@ -238,10 +252,16 @@ Generate summary and signal completion.
 **Anomalies**: (list any anomalies found)
 ```
 
-**2. If anomalies were found, escalate:**
+**2. If ESCALATION-WORTHY anomalies were found, escalate:**
+Apply the "Anomaly Detection" contract first — exclude the known-benign cases
+listed under "NOT anomalies" (notably the standing hq `dangling_parent_ref`
+cascade baseline, which is report-only). Escalate only what remains:
 ```bash
 gt escalate "Reaper anomalies detected" -s MEDIUM -m "<anomaly details>"
 ```
+If the only finding is the known benign baseline, record it in the report
+above and do NOT escalate — re-escalating a stable standing condition every
+cycle is noise, not signal.
 
 **3. Close this step (REQUIRED — final step of the workflow):**
 ```bash

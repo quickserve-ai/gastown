@@ -167,6 +167,20 @@ func (d *Daemon) runCompactorDog() {
 			continue
 		}
 
+		// gt-788i: NEVER flatten a database that has a remote. Flattening rewrites
+		// the commit graph into a brand-new lineage; for a synced DB that
+		// permanently orphans local from origin — a failed force-push (e.g. hq's
+		// #11087-broken remote) leaves local diverged, and for a cross-town SHARED
+		// remote it would force-push over the other town. The previous
+		// fetch-and-verify pre-flight had several proceed-to-flatten fallthroughs
+		// (e.g. remote-ref-not-found). Only purely-local (no-remote) databases are
+		// safe to compact; fail-safe treats any uncertainty as synced.
+		if d.compactorDBHasRemote(dbName) {
+			d.logger.Printf("compactor_dog: %s: has a remote (synced DB) — skipping compaction to avoid orphaning it from origin (gt-788i)", dbName)
+			skipped++
+			continue
+		}
+
 		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — compacting (mode=%s)",
 			dbName, commitCount, threshold, mode)
 
@@ -753,6 +767,34 @@ func (d *Daemon) compactorFetchAndVerify(dbName string) (diverged bool, err erro
 
 	d.logger.Printf("compactor_dog: fetch: %s: local ≥ %s (verified)", dbName, remoteName)
 	return false, nil
+}
+
+// compactorDBHasRemote reports whether dbName has any Dolt remote configured.
+// A database with a remote is "synced"; flattening it rewrites history into a
+// new lineage and orphans local from origin (gt-788i), so the compactor must
+// never flatten it. Fail-safe: any uncertainty (open error, query error) is
+// treated as "has a remote" so we err toward NOT flattening a synced DB.
+func (d *Daemon) compactorDBHasRemote(dbName string) bool {
+	db, err := d.compactorOpenDB(dbName)
+	if err != nil {
+		d.logger.Printf("compactor_dog: %s: cannot open to check for remote (%v) — treating as synced", dbName, err)
+		return true
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
+	defer cancel()
+
+	var remoteName string
+	err = db.QueryRowContext(ctx, "SELECT name FROM dolt_remotes LIMIT 1").Scan(&remoteName)
+	if err == sql.ErrNoRows {
+		return false // definitively no remote → purely local, safe to flatten
+	}
+	if err != nil {
+		d.logger.Printf("compactor_dog: %s: cannot query remotes (%v) — treating as synced", dbName, err)
+		return true // fail-safe
+	}
+	return remoteName != ""
 }
 
 // compactorForcePush pushes the compacted database to its DoltHub remote.

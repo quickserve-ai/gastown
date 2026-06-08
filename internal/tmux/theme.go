@@ -44,6 +44,7 @@ var DefaultPalette = []Theme{
 	{Name: "wine", BG: "#722f37", FG: "#f5f5dc"},     // Burgundy
 	{Name: "teal", BG: "#0d5c63", FG: "#e0e0e0"},     // Teal
 	{Name: "copper", BG: "#6d4c41", FG: "#f5f5dc"},   // Warm brown
+	{Name: "pine", BG: "#0f5132", FG: "#e0e0e0"},     // Deep pine green (distinct from forest, incl. at x0.4 window-tint)
 }
 
 // MayorTheme returns the special theme for the Mayor session.

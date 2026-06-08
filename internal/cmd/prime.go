@@ -134,6 +134,14 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return nil // Silent exit - not in workspace and not enabled
 	}
 
+	// Mirror the shared agent-lens library from the bridge into this clone
+	// (hq-y614fo.5). Idempotent, additive, soft — a failure here must never
+	// break or slow session startup, so it's a best-effort step. Honors
+	// --dry-run (reports planned copies without writing).
+	if err := syncBridgeLenses(townRoot, cwd, primeDryRun); err != nil {
+		fmt.Fprintf(os.Stderr, "[lens-sync] skipped: %v\n", err)
+	}
+
 	if primeHookMode {
 		handlePrimeHookMode(townRoot, cwd)
 	}

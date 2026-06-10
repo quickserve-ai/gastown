@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -236,6 +237,29 @@ func (t *Tmux) run(args ...string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
+		return "", t.wrapError(err, stderr.String(), args)
+	}
+
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// runWithStdin is like run but pipes stdin to the tmux subprocess. Used for
+// `load-buffer -` (loading a paste buffer from stdin), which avoids the
+// argument-length limits that constrain send-keys and set-buffer.
+func (t *Tmux) runWithStdin(stdin string, args ...string) (string, error) {
+	allArgs := []string{"-u"}
+	if t.socketName != "" {
+		allArgs = append(allArgs, "-L", t.socketName)
+	}
+	allArgs = append(allArgs, args...)
+	cmd := exec.Command("tmux", allArgs...)
+	hideConsoleWindow(cmd)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
 		return "", t.wrapError(err, stderr.String(), args)
 	}
 
@@ -1525,18 +1549,74 @@ func adaptiveTextDelay(messageLen int) time.Duration {
 	return delay
 }
 
-// sendMessageToTarget sends a sanitized message to a tmux target. For small
-// messages (< sendKeysChunkSize), uses send-keys -l. For larger messages,
-// sends in chunks with delays to avoid overwhelming the TTY input buffer.
+const sendKeysChunkSize = 512
+
+// pasteBufferSeq generates unique tmux paste-buffer names so concurrent nudge
+// deliveries to different panes cannot clobber one another's buffer.
+var pasteBufferSeq atomic.Uint64
+
+// sendMessageToTarget delivers a sanitized message to a tmux target so the
+// content lands literally in the receiver's input — regardless of whether that
+// pane's editor is in vim NORMAL or INSERT mode.
+//
+// Primary path: bracketed paste. Without it, `send-keys -l` injects the message
+// as raw keystrokes; if the receiver's Claude Code input is in vim NORMAL mode
+// (which crew worktrees inherit from global settings), the leading characters
+// are consumed as vim motions until one happens to flip to INSERT mode — so the
+// start of the nudge is silently eaten (hq-5ktear). A bracketed paste is
+// inserted verbatim, bypassing motion interpretation entirely.
+//
+// Fallback path: if bracketed paste fails (e.g. paste-buffer errors on a pane
+// that disappeared mid-delivery, or a cold-startup TUI not yet accepting
+// input), fall back to the legacy chunked send-keys path, which carries its
+// own startup-race retry. That path may truncate under vim, but a degraded
+// delivery beats a dropped nudge.
+func (t *Tmux) sendMessageToTarget(target, text string) error {
+	if err := t.bracketedPaste(target, text); err == nil {
+		return nil
+	}
+	return t.sendKeysChunked(target, text)
+}
+
+// bracketedPaste delivers text to a tmux target as a bracketed paste so the
+// content is inserted literally, regardless of the receiver's editor mode.
+//
+// Mechanism: load the text into a uniquely-named tmux paste buffer via stdin
+// (`load-buffer -`, which avoids the argument-length limits that constrain
+// send-keys/set-buffer), then paste it with `paste-buffer -p`. The -p flag
+// wraps the content in xterm bracketed-paste markers (ESC[200~ … ESC[201~) —
+// but ONLY if the target application has enabled bracketed-paste mode
+// (DECSET 2004). Claude Code's TUI enables it in both vim and normal editor
+// modes and inserts bracketed content literally, which is the hq-5ktear fix.
+// Applications that have NOT requested bracketed paste receive the raw bytes
+// (tmux emits no markers), so non-Claude panes degrade to the prior send-keys
+// behavior with no corruption — no mode detection required. The -d flag deletes
+// the buffer after pasting so buffers do not accumulate.
+func (t *Tmux) bracketedPaste(target, text string) error {
+	bufName := fmt.Sprintf("gt-nudge-%d", pasteBufferSeq.Add(1))
+	if _, err := t.runWithStdin(text, "load-buffer", "-b", bufName, "-"); err != nil {
+		return fmt.Errorf("load-buffer: %w", err)
+	}
+	if _, err := t.run("paste-buffer", "-d", "-p", "-b", bufName, "-t", target); err != nil {
+		// paste-buffer -d did not run to delete the buffer; clean it up so the
+		// load-buffer above does not leak a buffer on the failure path.
+		_, _ = t.run("delete-buffer", "-b", bufName)
+		return fmt.Errorf("paste-buffer: %w", err)
+	}
+	return nil
+}
+
+// sendKeysChunked is the legacy literal-keystroke delivery path, retained as a
+// fallback for sendMessageToTarget. For small messages (< sendKeysChunkSize),
+// uses send-keys -l. For larger messages, sends in chunks with delays to avoid
+// overwhelming the TTY input buffer.
 //
 // NOTE: The Linux TTY canonical mode buffer is 4096 bytes. Messages longer
 // than ~4000 bytes may be truncated by the kernel's line discipline when
 // delivered to programs using line-buffered input (readline, read, etc.).
 // This is a fundamental kernel limit, not a tmux limitation. Programs reading
 // raw stdin (like Claude Code's TUI) are not affected.
-const sendKeysChunkSize = 512
-
-func (t *Tmux) sendMessageToTarget(target, text string) error {
+func (t *Tmux) sendKeysChunked(target, text string) error {
 	if len(text) <= sendKeysChunkSize {
 		return t.sendKeysLiteralWithRetry(target, text, constants.NudgeReadyTimeout)
 	}

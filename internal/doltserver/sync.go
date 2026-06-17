@@ -152,6 +152,20 @@ func validSQLName(name string) bool {
 	return true
 }
 
+// remoteSyncTimeout bounds a single CALL DOLT_PULL / DOLT_PUSH against a GitHub
+// remote. The previous 120s was too short for upstream Dolt #11087 (git cat-file
+// fork-per-blob): once a shared DB had any non-trivial delta the transfer ran past
+// 120s and exec.CommandContext SIGKILLed it ("signal: killed"), so the DB could
+// never converge and divergence grew silently (qcore recurrence, gt-rdbdn6 mail
+// thread). 300s gives ~2.5x headroom for #11087-heavy transfers. Upper bound: the
+// single-syncer processes its 4 managed DBs serially under one lock and the syncer
+// steals a stale lock after 1800s; 4 * 300s = 1200s < 1800s, so a slow cycle can
+// never run long enough for a second cycle to steal the lock and push the shared
+// remote concurrently (the manifest race the syncer exists to prevent). Backlogs
+// too large for even 300s are handled by a controlled out-of-cycle catch-up, not by
+// raising this further.
+const remoteSyncTimeout = 300 * time.Second
+
 // PullDatabaseSQL pulls a database from its remote via SQL (CALL DOLT_PULL) through
 // the running Dolt server. This avoids lock contention with the server process.
 func PullDatabaseSQL(townRoot, db, remote, branch string) error {
@@ -174,9 +188,9 @@ func PullDatabaseSQL(townRoot, db, remote, branch string) error {
 		pullQuery = fmt.Sprintf("USE `%s`; CALL DOLT_PULL('%s')", db, remote)
 	}
 
-	// Pull can be slow for large databases or slow remotes
+	// Pull can be slow for large databases or slow remotes (Dolt #11087).
 	config := DefaultConfig(townRoot)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), remoteSyncTimeout)
 	defer cancel()
 
 	cmd := buildDoltSQLCmd(ctx, config, "-q", pullQuery)
@@ -375,9 +389,9 @@ func PushDatabaseSQL(townRoot, db, remote string, force bool) error {
 		pushQuery = fmt.Sprintf("USE `%s`; CALL DOLT_PUSH('--force', '%s', 'main')", db, remote)
 	}
 
-	// Push can be slow for large databases — use a longer timeout
+	// Push can be slow for large databases (Dolt #11087) — see remoteSyncTimeout.
 	config := DefaultConfig(townRoot)
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), remoteSyncTimeout)
 	defer cancel()
 
 	cmd := buildDoltSQLCmd(ctx, config, "-q", pushQuery)

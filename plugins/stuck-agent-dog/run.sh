@@ -27,6 +27,18 @@ if [ -z "$RIG_PREFIX_MAP" ]; then
   exit 0
 fi
 
+# Docked/parked rigs are INTENTIONALLY stopped (gt rig dock / park) — their
+# witness/refinery/polecats/crew are expected to be down. Health-checking them
+# produces false CRASHED flags and false "mass agent death" CRITICAL escalations
+# (hq-rdbdn6: docking atomize stormed bravo/delta/alpha + stuck-agent-dog on rust).
+# `gt rig list --json` reports operational state (operational/parked/docked) from
+# the rig identity bead's status label — the authoritative, synced source. Skip any
+# rig that is not operational. If the query fails (empty), we fall back to checking
+# all rigs (no worse than before), so this never silences a real operational rig.
+DOCKED_RIGS=$(gt rig list --json 2>/dev/null | jq -r '.[] | select(.status != "operational") | .name' 2>/dev/null || true)
+is_docked() { local r; for r in $DOCKED_RIGS; do [ "$r" = "$1" ] && return 0; done; return 1; }
+[ -n "$DOCKED_RIGS" ] && log "Skipping non-operational rigs (docked/parked): $(echo "$DOCKED_RIGS" | tr '\n' ' ')"
+
 # --- Check polecat health ----------------------------------------------------
 
 CRASHED=()
@@ -35,6 +47,10 @@ HEALTHY=0
 
 while IFS='|' read -r RIG PREFIX; do
   [ -z "$RIG" ] && continue
+  if is_docked "$RIG"; then
+    log "  SKIP rig $RIG: docked/parked (agents expected-stopped — not a crash)"
+    continue
+  fi
   POLECAT_DIR="$TOWN_ROOT/$RIG/polecats"
   [ -d "$POLECAT_DIR" ] || continue
 

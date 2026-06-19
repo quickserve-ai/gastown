@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+# gt-dolt-syncer — the single designated remote-sync process for Gas Town's
+# shared Dolt databases.
+#
+# WHY THIS EXISTS (hq-crzriu / gt-76og):
+#   Before this, every agent's bd-autopush, a `gt dolt sync` cron, and ad-hoc
+#   `gt dolt pull`s all pushed/pulled the shared GitHub remotes concurrently.
+#   git+ssh has no chunk-level atomicity, so concurrent pushes raced on the
+#   remote manifest and produced dangling .darc references (remote corruption).
+#   Worse, the non-keychain contexts (cron, detached agents) had no ssh-agent,
+#   so they failed `publickey`, retried, and churned connections until the Dolt
+#   server crashed. This is the single-syncer design from
+#   docs/design/dolt-federation-single-syncer.md, made durable.
+#
+# HOW IT AUTHS:
+#   Runs as a launchd LaunchAgent (com.woodhouse.gt-dolt-syncer) in the user's
+#   Aqua domain, so it inherits the per-user launchd ssh-agent (SSH_AUTH_SOCK =
+#   /private/tmp/com.apple.launchd.*/Listeners) that already holds id_ed25519 —
+#   the SAME agent the Dolt SQL server uses for its server-side CALL DOLT_PUSH.
+#   `ssh-add --apple-use-keychain` re-loads the key from the login keychain so
+#   it survives reboot once the GUI session unlocks the keychain.
+#
+# KNOWN LIMITATION (accepted by Cherub, mayor hq-wisp-mmcm9):
+#   On an UNATTENDED reboot the launchd agent comes up empty and the login
+#   keychain stays locked until a GUI login, so the syncer cannot auth. This is
+#   NOT silent: ensure_auth() files a visible P2 bead. HTTPS+token is the
+#   documented fallback if unattended-reboot sync ever becomes a requirement.
+#
+# THE CYCLE (serialized — exactly one remote op at a time):
+#   ensure auth -> for each managed DB:
+#       gt dolt pull --db <db>     (fetch + merge origin via CALL DOLT_PULL)
+#       integrity guard            (v1: server-side commit-graph walk —
+#                                   `select count(*) from dolt_log` reads every
+#                                   commit chunk and errors on a dangling
+#                                   reference, which is the documented
+#                                   v3->v4->v5 propagation mode. It's ~1s even
+#                                   on the 8.6G hq DB and lock-safe via the
+#                                   server. It does NOT verify table-data
+#                                   chunks; the full noms HEAD-graph walk in
+#                                   beads-Go is the documented follow-up. A full
+#                                   `dolt fsck` is too heavy for a 10-min cycle
+#                                   — minutes on hq.)
+#       gt dolt sync --db <db>     (push via server-side CALL DOLT_PUSH)
+#
+# qcore REJOINED 2026-06-02 (gt-76og): origin repaired by Alex-town (canonical
+# force-promoted to a fsck-clean source) + union-replay landed (our 685 local-only
+# commits merged onto the repaired canonical, latest-updated_at-wins + closure-guard,
+# pushed no-force). Local==origin, ahead=0/behind=0. The former empty-merge-base
+# (double-flatten) is permanently resolved — both lines now share the union merge
+# commit, so steady-state pulls are clean 3-way merges.
+
+set -u
+
+# --- config ---------------------------------------------------------------
+# Managed DBs for the AUTOMATED cycle. A database joins this set only once it
+# can push in steady state without risk to the shared server:
+#   - qcore  REJOINED 2026-06-02: gt-76og origin repair + union-replay landed
+#            (local==origin, ahead=0/behind=0; shared base = clean 3-way merges).
+#   - hq     is held until its one-time backlog is drained. On 2026-06-02 hq was
+#            1185 commits / 29 days behind origin; CALL DOLT_PUSH of that backlog
+#            spiked the SQL server to ~11 GB RSS (baseline ~7.5 GB) and the push
+#            was SIGKILLed with no progress — the upstream Dolt #11087
+#            fork-per-blob cost. Retrying that every 10 min would walk the server
+#            into OOM/jetsam, the exact crash this syncer exists to prevent. hq
+#            rejoins once a controlled drain gets it to steady state (then each
+#            cycle pushes only minutes of new mail/beads — cheap). Tracked
+#            separately; see the hq-backlog-drain bead.
+#   - xtm    REJOINED 2026-06-03 (vector #11, gt-6o15): bridge PR #10 made
+#            `xtm inbox`/`send` PULL-ONLY (no per-agent push), so the syncer is
+#            now the only xtm pusher. Because xtm is SHARED with Alex's town, we
+#            push it only on EVEN ten-minute marks (:00/:20/:40) and Alex pushes
+#            on ODD marks (:10/:30/:50) — the co-signed one-bounded-pusher-per-
+#            town stagger, enforced by the stagger guard in sync_db (STAGGERED_DBS).
+#            Alex's xtm cron stays OFF until coordinated 'go'.
+#            See docs/design/dolt-federation-single-syncer.md row 11.
+#   - hq     REJOINED 2026-06-08 (gt-9yqz method-B reconcile): the 46k-divergence
+#            was resolved (fresh canonical clone + live-data overlay, pushed via
+#            CLI, local==origin ahead=0/behind=0). The OOM hold reason is gone —
+#            the drained steady-state push is FLAT-RSS (~0.94 GB) and completes in
+#            ~17s well under the cycle timeout (verified). hq is our-internal
+#            (Alex never writes it) so it is NOT push-staggered. The earlier 2-min
+#            SIGKILLs were the one-time accumulated-delta drain, not steady state.
+DBS=(gastown qcore xtm hq)           # + hq REJOINED 2026-06-08 (gt-9yqz reconcile; steady-state push ~17s flat-RSS); xtm rejoined 2026-06-03 PR#10 pull-only
+
+# Cross-town SHARED DBs push only on EVEN ten-minute marks (:00/:20/:40); Alex's
+# town pushes on ODD marks. One bounded pusher per town, staggered, so the two
+# towns never push the shared remote concurrently (the manifest race this whole
+# syncer exists to prevent). Pull is read-only on the remote and runs every
+# cycle regardless — only PUSH is gated. See vector #11 (gt-6o15).
+STAGGERED_DBS=(xtm qcore)   # qcore added 2026-06-10 (gt-cuqp): cross-town SHARED with Alex's q-core; after the 20:40 self-heal sync it pushes every cycle un-staggered, racing Alex's town on the manifest — stagger to even-ten only.
+DATA_DIR="$HOME/gt/.dolt-data"
+SSH_KEY="$HOME/.ssh/id_ed25519"
+WORKSPACE="$HOME/gt/gastown/crew/woodhouse"  # a Gas Town workspace dir — gt and bd
+                                             # both resolve their config from CWD,
+                                             # and launchd starts us at "/", so we
+                                             # MUST cd here before any gt/bd command.
+BD_DIR="$WORKSPACE"                          # (alerts file beads from here too)
+STATE_DIR="$HOME/.local/state/gt-dolt-syncer"
+RUNLOG="$STATE_DIR/runs.log"
+STATUS="$STATE_DIR/status.json"
+LOCK="$STATE_DIR/lock"
+PUSH_FAIL_THRESHOLD=3                # consecutive push failures before alerting
+PULL_FAIL_THRESHOLD=3                # consecutive pull failures before alerting (gt-rdbdn6/qcore-recurrence:
+                                     # a wedged pull — merge conflict, dirty working set, or 120s #11087
+                                     # SIGKILL — silently grew divergence for ~6 days because only PUSH
+                                     # failures alerted. Pull failures now alert at the same threshold.)
+STALE_LOCK_SECS=1800                 # steal a lock older than 30 min
+DOLT_SQL=(dolt --host 127.0.0.1 --port 3307 --user root --password "" --no-tls sql -q)
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export HOME="${HOME:-/Users/cherub}"
+
+mkdir -p "$STATE_DIR"
+
+ts()  { date -Iseconds; }
+log() { printf '%s %s\n' "$(ts)" "$*" >>"$RUNLOG"; }
+
+# launchd starts us at "/"; gt/bd resolve config from CWD, so anchor in the
+# workspace before anything else runs.
+cd "$WORKSPACE" 2>/dev/null || { log "FATAL: cannot cd to Gas Town workspace $WORKSPACE"; exit 1; }
+
+# --- alert dedup ----------------------------------------------------------
+# An alert episode is one open bead; we don't re-file while a marker exists,
+# and we clear the marker (and note recovery) on the next clean run.
+file_alert() {
+  local kind=$1 title=$2 desc=$3
+  local marker="$STATE_DIR/alert-${kind}.active"
+  if [[ -f "$marker" ]]; then
+    log "alert[$kind] already active ($(cat "$marker")); not re-filing"
+    return 0
+  fi
+  local bid
+  bid=$(cd "$BD_DIR" 2>/dev/null && bd create --type task --priority 2 \
+        --assignee gastown/crew/woodhouse -d "$desc" "$title" 2>>"$RUNLOG" \
+        | grep -oE '[a-z]+-[a-z0-9]+' | head -1)
+  printf '%s %s\n' "$(ts)" "${bid:-unknown}" >"$marker"
+  log "alert[$kind] FILED bead=${bid:-unknown}: $title"
+}
+clear_alert() {
+  local kind=$1
+  local marker="$STATE_DIR/alert-${kind}.active"
+  if [[ -f "$marker" ]]; then
+    log "alert[$kind] cleared (was $(cat "$marker"))"
+    rm -f "$marker"
+  fi
+}
+
+# --- serialize: one cycle at a time ---------------------------------------
+acquire_lock() {
+  if mkdir "$LOCK" 2>/dev/null; then
+    return 0
+  fi
+  # Lock held — steal it only if stale (a cycle must never run this long).
+  local age
+  if [[ -d "$LOCK" ]]; then
+    local mtime now
+    mtime=$(stat -f %m "$LOCK" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    age=$((now - mtime))
+    if (( age > STALE_LOCK_SECS )); then
+      log "stealing stale lock (age=${age}s)"
+      rm -rf "$LOCK" && mkdir "$LOCK" 2>/dev/null && return 0
+    fi
+  fi
+  log "another cycle holds the lock; skipping this fire"
+  return 1
+}
+
+acquire_lock || exit 0
+trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
+
+# --- auth -----------------------------------------------------------------
+key_fp() { ssh-keygen -lf "$SSH_KEY" 2>/dev/null | awk '{print $2}'; }
+
+ensure_auth() {
+  # 1. Make sure the key is in the inherited launchd agent (idempotent;
+  #    --apple-use-keychain re-loads it from the keychain after reboot).
+  local fp
+  fp=$(key_fp)
+  if [[ -z "$fp" ]] || ! ssh-add -l 2>/dev/null | grep -q "$fp"; then
+    ssh-add --apple-use-keychain "$SSH_KEY" </dev/null >>"$RUNLOG" 2>&1 || true
+  fi
+  # 2. Probe the actual GitHub SSH auth — this is the precise detector for the
+  #    publickey-stall failure mode (post-reboot locked keychain / empty agent).
+  local probe
+  probe=$(ssh -T -o BatchMode=yes -o ConnectTimeout=10 \
+              -o StrictHostKeyChecking=accept-new git@github.com 2>&1)
+  if grep -q "successfully authenticated" <<<"$probe"; then
+    clear_alert auth
+    return 0
+  fi
+  log "AUTH PROBE FAILED: $probe"
+  file_alert auth \
+    "gt-dolt-syncer: SSH auth to GitHub is FAILING — Dolt remotes not syncing" \
+    "The single Dolt syncer (com.woodhouse.gt-dolt-syncer) could not authenticate to git@github.com.
+
+Probe output:
+$probe
+
+Likely cause: the per-user launchd ssh-agent is empty and the login keychain is
+locked — the known unattended-reboot limitation (a GUI login is required to
+unlock the keychain and reload id_ed25519). Until this clears, NO shared Dolt
+database (hq/xtm/gastown) is pushing to its remote; divergence will grow.
+
+Fix: log in to the GUI session (unlocks keychain), or run:
+    ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+then verify: ssh -T git@github.com  (expect 'successfully authenticated').
+The syncer self-clears this alert on its next successful auth.
+
+Fallback if unattended-reboot sync becomes a hard requirement: switch the
+syncer to HTTPS + a fine-grained PAT (documented in
+docs/design/dolt-federation-single-syncer.md)."
+  return 1
+}
+
+# --- per-DB sync ----------------------------------------------------------
+streak_file() { echo "$STATE_DIR/$1.streak"; }
+get_streak()  { cat "$(streak_file "$1")" 2>/dev/null || echo 0; }
+set_streak()  { echo "$2" >"$(streak_file "$1")"; }
+
+# Is this DB cross-town shared (push-staggered)?
+is_staggered() { local d; for d in "${STAGGERED_DBS[@]}"; do [[ "$d" == "$1" ]] && return 0; done; return 1; }
+# We own the EVEN ten-minute marks (:00/:20/:40). 10#$(date +%M) forces base-10
+# so leading-zero minutes (08, 09) don't parse as invalid octal.
+is_our_push_window() { (( ( 10#$(date +%M) / 10 ) % 2 == 0 )); }
+
+declare -A DB_RESULT DB_REASON
+
+sync_db() {
+  local db=$1
+
+  # gt-4bms: commit any dirty working set BEFORE the pull. `CALL DOLT_PULL`
+  # (fetch+merge) fails "cannot merge with uncommitted changes" on a dirty WS;
+  # qcore's `config` table churns continuously (bd remember / kv.memory.* writes;
+  # NOT in dolt_ignore), so the pull perpetually wedges, push is skipped, and the
+  # DB re-diverges and stays stuck-local (gt-cuqp self-healed only by a lucky
+  # clean-WS instant). These are real bd writes that must sync anyway — we just
+  # commit them before the merge instead of after (the push path already commits
+  # post-pull). NO --allow-empty, so a clean WS produces no empty commit and adds
+  # no chunk churn (#11087). Mirrors PushDatabaseSQL's add+commit (sync.go).
+  "${DOLT_SQL[@]}" "use \`$db\`; CALL DOLT_ADD('-A');" >>"$RUNLOG" 2>&1 || true
+  if "${DOLT_SQL[@]}" "use \`$db\`; CALL DOLT_COMMIT('-m', 'gt-dolt-syncer: pre-pull commit of dirty working set (gt-4bms)', '--author', 'Gas Town Sync <sync@gastown.local>');" >>"$RUNLOG" 2>&1; then
+    log "[$db] committed dirty working set before pull (gt-4bms)"
+  fi
+
+  log "[$db] pull…"
+  if ! gt dolt pull --db "$db" >>"$RUNLOG" 2>&1; then
+    local ps; ps=$(( $(get_streak "pull-$db") + 1 )); set_streak "pull-$db" "$ps"
+    DB_RESULT[$db]=fail; DB_REASON[$db]="pull failed (streak $ps)"
+    log "[$db] PULL FAILED — skipping push this cycle (consecutive streak $ps)"
+    if (( ps >= PULL_FAIL_THRESHOLD )); then
+      file_alert "pull-$db" \
+        "gt-dolt-syncer: '$db' pull failing ${ps}x in a row — divergence growing SILENTLY" \
+        "The single Dolt syncer has failed to PULL '$db' $ps cycles in a row. A failed pull
+means origin's commits are NOT merging into local, so divergence grows invisibly until a
+local writer hits the wedged/conflicted working set and rolls back (the gt-76og / qcore
+recurrence failure mode). Auth is fine (the cycle got past ensure_auth). Likely cause —
+check runs.log ($RUNLOG) for the '$db' pull error:
+  - 'Merge conflict detected' / 'cannot merge': cross-town lifecycle conflict on a shared
+    DB (qcore/xtm). Resolve via 'dolt conflicts resolve' (latest-updated_at-wins +
+    closure-guard, per gt-76og), then commit.
+  - 'cannot merge with uncommitted changes': the working set is dirty — stage + commit it.
+  - 'signal: killed': the 120s op timeout (internal/doltserver/sync.go) is too short for an
+    #11087-heavy transfer. Needs the staged timeout bump and/or a controlled catch-up.
+Until this clears, '$db' is NOT converging. Check: gt dolt status."
+    fi
+    return 1
+  fi
+  # Pull succeeded — clear any standing pull-failure alert and reset the streak.
+  set_streak "pull-$db" 0
+  clear_alert "pull-$db"
+
+  log "[$db] integrity (commit-graph walk)…"
+  if ! "${DOLT_SQL[@]}" "use \`$db\`; select count(*) from dolt_log;" >>"$RUNLOG" 2>&1; then
+    DB_RESULT[$db]=fail; DB_REASON[$db]="integrity guard failed"
+    log "[$db] INTEGRITY GUARD FAILED — refusing to push possibly-corrupt store"
+    file_alert "integrity-$db" \
+      "gt-dolt-syncer: commit-graph integrity guard failed for '$db' — push BLOCKED" \
+      "Pre-push integrity guard (commit-graph walk: select count(*) from dolt_log)
+failed for the '$db' database — a commit chunk could not be read, which is the
+dangling-reference pattern behind the gt-76og / v3->v4->v5 corruption. The
+syncer refused to push, to avoid propagating the dangling reference onward.
+Investigate the local '$db' store at $DATA_DIR/$db before any further push.
+See runs.log: $RUNLOG"
+    return 1
+  fi
+
+  # Cross-town stagger: a shared DB pushes only in OUR window (even ten-minute
+  # marks). Pull + integrity already ran this cycle (safe every cycle); we defer
+  # only the push to avoid pushing concurrently with Alex's town.
+  if is_staggered "$db" && ! is_our_push_window; then
+    set_streak "$db" 0
+    DB_RESULT[$db]=ok; DB_REASON[$db]="pull-only (odd-ten — Alex's push window)"
+    log "[$db] odd-ten mark — push deferred to Alex's town (cross-town stagger)"
+    return 0
+  fi
+
+  log "[$db] push (gt dolt sync)…"
+  if ! gt dolt sync --db "$db" >>"$RUNLOG" 2>&1; then
+    local s; s=$(( $(get_streak "$db") + 1 )); set_streak "$db" "$s"
+    DB_RESULT[$db]=fail; DB_REASON[$db]="push failed (streak $s)"
+    log "[$db] PUSH FAILED (consecutive streak $s)"
+    if (( s >= PUSH_FAIL_THRESHOLD )); then
+      file_alert "push-$db" \
+        "gt-dolt-syncer: '$db' push failing ${s}x in a row — divergence growing" \
+        "The single Dolt syncer has failed to push '$db' $s cycles in a row.
+Auth is fine (the syncer auth-probe passes), so this is most likely the
+upstream Dolt #11087 fork-per-blob slowness causing 'context deadline exceeded'
+on a large catch-up push, OR a remote-side problem. Divergence on '$db' will
+grow until this clears. Check: gt dolt status, and runs.log: $RUNLOG"
+    fi
+    return 1
+  fi
+
+  set_streak "$db" 0
+  clear_alert "push-$db"
+  clear_alert "integrity-$db"
+  DB_RESULT[$db]=ok; DB_REASON[$db]=""
+  log "[$db] push OK"
+  return 0
+}
+
+# --- run ------------------------------------------------------------------
+log "=== cycle start (dbs: ${DBS[*]}) ==="
+
+if ! ensure_auth; then
+  log "=== cycle aborted: no auth ==="
+  # still write status so observability reflects the stall
+  jq -n --arg t "$(ts)" '{last_cycle:$t, auth_ok:false, dbs:{}}' >"$STATUS" 2>/dev/null
+  exit 0
+fi
+
+for db in "${DBS[@]}"; do
+  sync_db "$db" || true
+done
+
+# --- status.json for observability ---------------------------------------
+{
+  printf '{"last_cycle":"%s","auth_ok":true,"dbs":{' "$(ts)"
+  first=1
+  for db in "${DBS[@]}"; do
+    [[ $first -eq 1 ]] || printf ','
+    first=0
+    printf '"%s":{"result":"%s","reason":"%s","fail_streak":%s}' \
+      "$db" "${DB_RESULT[$db]:-skip}" "${DB_REASON[$db]:-}" "$(get_streak "$db")"
+  done
+  printf '}}'
+} >"$STATUS"
+
+log "=== cycle done ==="
+exit 0

@@ -381,6 +381,32 @@ This helps the Deacon understand which convoys have been recently fed.`,
 	RunE: runDeaconFeedStrandedState,
 }
 
+var deaconCleanTestPollutionCmd = &cobra.Command{
+	Use:   "clean-test-pollution",
+	Short: "Detect and clean runtime test pollution",
+	Long: `Detect and remove runtime test pollution left by dead processes.
+
+Cleans four categories of pollution. Only items where the owning process is
+confirmed dead are removed — items with live owning processes are always skipped.
+
+  1. Rogue dolt servers — dolt sql-server processes that hold the configured
+     port but use a different data directory ("imposters").
+
+  2. Stale test temp dirs — beads-test-dolt-* and beads-bd-tests-* directories
+     in TMPDIR with no open file handles.
+
+  3. Stale PID files — /tmp/dolt-test-server-*.pid and /tmp/beads-test-dolt-*.pid
+     files whose recorded PID is dead.
+
+  4. Dead dog worktrees — git worktrees under ~/gt/deacon/dogs/<name>/ for dogs
+     whose tmux sessions are no longer alive.
+
+Examples:
+  gt deacon clean-test-pollution           # Clean all categories
+  gt deacon clean-test-pollution --dry-run # Preview without cleaning`,
+	RunE: runDeaconCleanTestPollution,
+}
+
 var (
 	// Status flags
 	deaconStatusJSON bool
@@ -413,6 +439,9 @@ var (
 	feedStrandedMaxFeeds int
 	feedStrandedCooldown time.Duration
 	feedStrandedJSON     bool
+
+	// Clean-test-pollution flags
+	cleanTestPollutionDryRun bool
 )
 
 func init() {
@@ -435,6 +464,7 @@ func init() {
 	deaconCmd.AddCommand(deaconDispatchGatedCmd)
 	deaconCmd.AddCommand(deaconFeedStrandedCmd)
 	deaconCmd.AddCommand(deaconFeedStrandedStateCmd)
+	deaconCmd.AddCommand(deaconCleanTestPollutionCmd)
 
 	// Flags for status
 	deaconStatusCmd.Flags().BoolVar(&deaconStatusJSON, "json", false, "Output as JSON")
@@ -486,6 +516,10 @@ func init() {
 	deaconStartCmd.Flags().StringVar(&deaconAgentOverride, "agent", "", "Agent alias to run the Deacon with (overrides town default)")
 	deaconAttachCmd.Flags().StringVar(&deaconAgentOverride, "agent", "", "Agent alias to run the Deacon with (overrides town default)")
 	deaconRestartCmd.Flags().StringVar(&deaconAgentOverride, "agent", "", "Agent alias to run the Deacon with (overrides town default)")
+
+	// Flags for clean-test-pollution
+	deaconCleanTestPollutionCmd.Flags().BoolVar(&cleanTestPollutionDryRun, "dry-run", false,
+		"Preview what would be cleaned without making changes")
 
 	rootCmd.AddCommand(deaconCmd)
 }
@@ -1700,6 +1734,45 @@ func runDeaconFeedStranded(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n%s Fed: %d, Closed: %d, Needs attention: %d, Skipped: %d, Errors: %d\n",
 		style.Bold.Render("●"), result.Fed, result.Closed, result.NeedsAttention, result.Skipped, result.Errors)
 
+	return nil
+}
+
+// runDeaconCleanTestPollution detects and removes runtime test pollution.
+func runDeaconCleanTestPollution(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	if cleanTestPollutionDryRun {
+		fmt.Printf("%s Dry run — would clean test pollution (no changes made)\n", style.Dim.Render("○"))
+		fmt.Println("  Categories scanned:")
+		fmt.Println("  1. Rogue dolt servers (imposters on configured port)")
+		fmt.Println("  2. Stale test temp dirs (beads-test-dolt-*, beads-bd-tests-* in TMPDIR)")
+		fmt.Println("  3. Stale PID files (/tmp/dolt-test-server-*.pid, /tmp/beads-test-dolt-*.pid)")
+		fmt.Println("  4. Dead dog worktrees (dogs/ dirs with no live tmux session)")
+		fmt.Printf("%s Run without --dry-run to clean.\n", style.Dim.Render("ℹ"))
+		return nil
+	}
+
+	result, err := deacon.CleanTestPollution(townRoot)
+	if err != nil {
+		style.PrintWarning("test pollution cleanup completed with warnings: %v", err)
+	}
+
+	total := result.RogueDoltKilled + result.StaleTestDirsRemoved + result.StalePIDFilesRemoved + result.DeadWorktreesPruned
+	if total == 0 {
+		fmt.Printf("%s Test pollution cleanup: clean\n", style.Dim.Render("○"))
+		return nil
+	}
+
+	fmt.Printf("%s Test pollution cleanup: rogue_dolt=%d stale_dirs=%d stale_pids=%d dead_worktrees=%d\n",
+		style.Bold.Render("✓"),
+		result.RogueDoltKilled,
+		result.StaleTestDirsRemoved,
+		result.StalePIDFilesRemoved,
+		result.DeadWorktreesPruned,
+	)
 	return nil
 }
 

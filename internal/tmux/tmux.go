@@ -3355,8 +3355,46 @@ func (t *Tmux) EnableMouseMode(session string) error {
 	}
 	// Enable clipboard integration with terminal (OSC 52)
 	// This allows copying text to system clipboard when selecting with mouse
-	_, err = t.run("set-option", "-t", session, "set-clipboard", "on")
-	return err
+	if _, err = t.run("set-option", "-t", session, "set-clipboard", "on"); err != nil {
+		return err
+	}
+	// Opt-in: harden the mouse wheel so scrolling never enters tmux copy-mode.
+	// Entering copy-mode on a long-lived pane can trip a tmux heap double-free
+	// that aborts the whole server and kills every session at once (hq-lfvex4 /
+	// upstream tmux issue #4777, fixed only in tmux master, NOT the 3.6.x line).
+	// Gated OFF by default so shipping this is inert — it changes mouse-scroll
+	// UX, so it is opt-in. Enable with:
+	//     tmux set -g @gt-harden-wheel-copy-mode on
+	if out, oerr := t.run("show-options", "-gv", "@gt-harden-wheel-copy-mode"); oerr == nil && strings.TrimSpace(out) == "on" {
+		return t.HardenWheelCopyMode()
+	}
+	return nil
+}
+
+// HardenWheelCopyMode rebinds mouse-wheel scroll so it never enters tmux
+// copy-mode. The default root WheelUpPane binding runs "copy-mode -e"; entering
+// copy-mode on a long-lived pane (large accumulated grid) can trip a tmux heap
+// double-free in grid_free_line that aborts the entire server and kills every
+// session at once (hq-lfvex4 / upstream tmux issue #4777). Forwarding the wheel
+// to the application with "send-keys -M" preserves scrolling in mouse-aware
+// TUIs and keeps click-to-select, but never enters copy-mode. The root-table
+// binding is server-global and idempotent.
+//
+// This is gated by EnableMouseMode behind the @gt-harden-wheel-copy-mode server
+// option because it changes mouse-scroll UX (scroll no longer opens tmux
+// scrollback/copy-mode).
+func (t *Tmux) HardenWheelCopyMode() error {
+	// The command list must be one argument so tmux parses the ";" as a command
+	// separator (passing the parts as separate argv elements fails with "no
+	// mouse target"). "send-keys -M" forwards the wheel to the application;
+	// "select-pane -t =" selects the pane under the cursor. Neither enters
+	// copy-mode (the default binding's else-branch, "copy-mode -e", is dropped).
+	for _, key := range []string{"WheelUpPane", "WheelDownPane"} {
+		if _, err := t.run("bind-key", "-T", "root", key, "select-pane -t = ; send-keys -M"); err != nil {
+			return fmt.Errorf("hardening %s against copy-mode: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // IsInsideTmux checks if the current process is running inside a tmux session.

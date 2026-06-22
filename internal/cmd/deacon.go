@@ -1392,10 +1392,23 @@ func runDeaconResume(cmd *cobra.Command, args []string) error {
 
 // runDeaconCleanupOrphans cleans up orphaned claude subagent processes.
 func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
-	// First, find orphans
-	orphans, err := util.FindOrphanedClaudeProcesses()
+	// Get current town root for multi-town awareness.
+	// Each town's deacon only cleans up processes belonging to its own town.
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	// Find all orphans, then filter to this town only.
+	allOrphans, err := util.FindOrphanedClaudeProcesses()
 	if err != nil {
 		return fmt.Errorf("finding orphaned processes: %w", err)
+	}
+	var orphans []util.OrphanedProcess
+	for _, o := range allOrphans {
+		if o.TownRoot == townRoot {
+			orphans = append(orphans, o)
+		}
 	}
 
 	if len(orphans) == 0 {
@@ -1405,8 +1418,8 @@ func runDeaconCleanupOrphans(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Found %d orphaned claude process(es)\n", style.Bold.Render("●"), len(orphans))
 
-	// Process them with signal escalation
-	results, err := util.CleanupOrphanedClaudeProcesses()
+	// Process them with signal escalation, restricted to this town.
+	results, err := util.CleanupOrphanedClaudeProcesses(townRoot)
 	if err != nil {
 		style.PrintWarning("cleanup had errors: %v", err)
 	}

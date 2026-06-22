@@ -775,11 +775,25 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 //  2. Next cycle, still alive after grace period → SIGKILL, update state
 //  3. Next cycle, still alive after SIGKILL → log as unkillable, remove from state
 //
+// townRoot, when non-empty, restricts cleanup to processes whose working directory
+// is under that Gas Town workspace root. Pass "" to clean up all orphans (daemon use case).
+//
 // Returns the list of cleanup results and any error encountered.
-func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
+func CleanupOrphanedClaudeProcesses(townRoot string) ([]CleanupResult, error) {
 	orphans, err := FindOrphanedClaudeProcesses()
 	if err != nil {
 		return nil, err
+	}
+
+	// Filter to the specified town when a root is given.
+	if townRoot != "" {
+		filtered := orphans[:0]
+		for _, o := range orphans {
+			if o.TownRoot == townRoot {
+				filtered = append(filtered, o)
+			}
+		}
+		orphans = filtered
 	}
 
 	// Load previous state

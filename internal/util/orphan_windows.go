@@ -43,7 +43,7 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 }
 
 // CleanupOrphanedClaudeProcesses is a Windows stub.
-func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
+func CleanupOrphanedClaudeProcesses(townRoot string) ([]CleanupResult, error) {
 	return nil, nil
 }
 

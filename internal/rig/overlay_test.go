@@ -2,6 +2,7 @@ package rig
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -543,7 +544,143 @@ func TestGasTownLocalExcludePatterns_IncludesBeads(t *testing.T) {
 	}
 }
 
+// TestEnsureGitignorePatterns_RespectsClaudeStarCarveOut verifies that a repo
+// which carves out .claude/ via ".claude/*" + "!.claude/agents/" does NOT get a
+// blanket ".claude/" appended after the negations (which last-match-wins would
+// shadow, breaking git add for tracked carve-out siblings). Regression for the
+// q-core recurring refinery PR reported by qcore/cyril (2026-06-22).
+func TestEnsureGitignorePatterns_RespectsClaudeStarCarveOut(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// All required patterns are present (so only .claude/ is in question), with
+	// the .claude carve-out expressed as the q-core .gitignore does it.
+	existing := ".runtime/\n.claude/*\n!.claude/agents/\n!.claude/skills/\n.logs/\n__pycache__/\nstate.json\nCLAUDE.md\nCLAUDE.local.md\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(existing), 0644); err != nil {
+		t.Fatalf("Failed to create .gitignore: %v", err)
+	}
+
+	if err := EnsureGitignorePatterns(tmpDir); err != nil {
+		t.Fatalf("EnsureGitignorePatterns() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(tmpDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("Failed to read .gitignore: %v", err)
+	}
+
+	// A blanket ".claude/" line must NOT be appended — ".claude/*" already covers it.
+	if containsLine(string(content), ".claude/") {
+		t.Error("blanket .claude/ must not be appended when .claude/* carve-out is present (would shadow !.claude/agents/)")
+	}
+	// And the file should be untouched entirely (no header, no new lines).
+	if string(content) != existing {
+		t.Errorf("File was modified when it shouldn't be.\nGot:  %q\nWant: %q", string(content), existing)
+	}
+}
+
+// TestEnsureGitignorePatterns_SkipsTrackedPaths verifies gt never adds a
+// .gitignore entry for a path the repo already tracks (e.g. CLAUDE.md at root,
+// or .claude/ config files). Regression for qcore/cyril (2026-06-22).
+func TestEnsureGitignorePatterns_SkipsTrackedPaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "test")
+
+	// Track CLAUDE.md at root and a file under .claude/ (no carve-out glob here,
+	// so only the tracked-path guard can prevent the blanket entries).
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# proj\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".claude", "agents"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".claude", "agents", "a.md"), []byte("x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "CLAUDE.md", ".claude/agents/a.md")
+
+	// Minimal .gitignore with no .claude/ or CLAUDE.md handling.
+	existing := ".runtime/\n.logs/\n__pycache__/\nstate.json\nCLAUDE.local.md\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(existing), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureGitignorePatterns(dir); err != nil {
+		t.Fatalf("EnsureGitignorePatterns() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsLine(string(content), ".claude/") {
+		t.Error("blanket .claude/ must not be appended when repo tracks .claude/ files")
+	}
+	if containsLine(string(content), "CLAUDE.md") {
+		t.Error("CLAUDE.md must not be appended when it is tracked at repo root")
+	}
+}
+
+// TestEnsureGitignorePatterns_AppendsForUntrackedRepo verifies the common case is
+// unchanged: a git repo that tracks none of the Gas Town paths still gets them.
+func TestEnsureGitignorePatterns_AppendsForUntrackedRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+
+	// A tracked unrelated file, but none of the Gas Town paths.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# r\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "README.md")
+
+	if err := EnsureGitignorePatterns(dir); err != nil {
+		t.Fatalf("EnsureGitignorePatterns() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{".runtime/", ".claude/", ".logs/", "__pycache__/", "state.json", "CLAUDE.md"} {
+		if !containsLine(string(content), p) {
+			t.Errorf("untracked repo should still get pattern %q", p)
+		}
+	}
+}
+
+func TestMatchesGitignorePattern_StarGlobCoversDir(t *testing.T) {
+	cases := []struct {
+		line, pattern string
+		want          bool
+	}{
+		{".claude/*", ".claude/", true},
+		{".claude/*", ".claude", true},
+		{".runtime/*", ".runtime/", true},
+		{".claude/*", ".logs/", false},
+		{".claude/commands/*", ".claude/", false}, // narrower glob does not cover the parent
+	}
+	for _, c := range cases {
+		if got := matchesGitignorePattern(c.line, c.pattern); got != c.want {
+			t.Errorf("matchesGitignorePattern(%q, %q) = %v, want %v", c.line, c.pattern, got, c.want)
+		}
+	}
+}
+
 // Helper functions
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
 
 func containsLine(content, pattern string) bool {
 	for _, line := range splitLines(content) {

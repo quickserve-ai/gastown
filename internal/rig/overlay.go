@@ -112,8 +112,19 @@ func EnsureGitignorePatterns(worktreePath string) error {
 		}
 	}
 
+	// Never add a .gitignore entry for a path the repo already tracks. A blanket
+	// pattern (e.g. ".claude/" or "CLAUDE.md") appended after an intentional
+	// carve-out is last-match-wins and silently shadows it; for a tracked root
+	// file the entry is simply wrong. q-core deliberately tracks .claude/ config
+	// (behind a ".claude/*" + "!.claude/agents/" carve-out) and CLAUDE.md at root;
+	// re-injecting these broke `git add` for carve-out siblings and generated
+	// recurring refinery PRs (qcore/cyril 2026-06-22). Scoped to the committed
+	// .gitignore only — EnsureLocalExcludePatterns intentionally carries .beads/
+	// (gas-7vg) and must not be filtered here.
+	missing = dropTrackedPatterns(worktreePath, missing)
+
 	if len(missing) == 0 {
-		return nil // All patterns present
+		return nil // All patterns present (or already tracked)
 	}
 
 	// Append missing patterns
@@ -142,6 +153,61 @@ func EnsureGitignorePatterns(worktreePath string) error {
 	}
 
 	return nil
+}
+
+// dropTrackedPatterns returns patterns minus any whose path the git repo at
+// worktreePath already tracks. gt must never ignore a deliberately-tracked path.
+// Returns the input unchanged when worktreePath is not a queryable git repo
+// (e.g. a freshly-created dir), preserving the prior append-everything behavior.
+func dropTrackedPatterns(worktreePath string, patterns []string) []string {
+	if len(patterns) == 0 {
+		return patterns
+	}
+
+	// Map each pattern to a path pathspec (".claude/" -> ".claude", "CLAUDE.md"
+	// unchanged) and ask git which of those paths it tracks. Passing the paths as
+	// pathspecs keeps the output bounded to just the candidates.
+	args := []string{"-C", worktreePath, "ls-files", "-z", "--"}
+	pathToPattern := make(map[string]string, len(patterns))
+	for _, p := range patterns {
+		path := strings.TrimPrefix(strings.TrimSuffix(p, "/"), "/")
+		if path == "" {
+			continue
+		}
+		args = append(args, path)
+		pathToPattern[path] = p
+	}
+	if len(pathToPattern) == 0 {
+		return patterns
+	}
+
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return patterns // not a git repo / git unavailable: keep prior behavior
+	}
+
+	tracked := make(map[string]bool)
+	for _, f := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		if f == "" {
+			continue
+		}
+		for path, pattern := range pathToPattern {
+			if f == path || strings.HasPrefix(f, path+"/") {
+				tracked[pattern] = true
+			}
+		}
+	}
+	if len(tracked) == 0 {
+		return patterns
+	}
+
+	kept := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		if !tracked[p] {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 // gasTownLocalExcludePatterns returns the patterns to write to the worktree-local
@@ -264,6 +330,19 @@ func matchesGitignorePattern(line, pattern string) bool {
 	// Also handle directory pattern without trailing slash
 	if !strings.Contains(normLine, "/") && strings.HasPrefix(normPattern, normLine+"/") {
 		return true
+	}
+
+	// A directory-contents glob (e.g. ".claude/*") satisfies the requirement to
+	// ignore that directory (".claude/"): the contents are already ignored, with
+	// any "!.claude/agents/"-style carve-out preserved. Recognizing it prevents gt
+	// from appending a blanket ".claude/" AFTER an intentional ".claude/*" +
+	// "!.claude/..." carve-out, which last-match-wins would otherwise shadow
+	// (q-core tracks 42 .claude/ files behind exactly such a carve-out — qcore/cyril).
+	if strings.HasSuffix(normLine, "/*") {
+		globDir := strings.TrimSuffix(normLine, "*") // ".claude/*" -> ".claude/"
+		if normPattern == globDir || normPattern == strings.TrimSuffix(globDir, "/") {
+			return true
+		}
 	}
 
 	return false

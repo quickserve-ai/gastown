@@ -1369,6 +1369,20 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 		}
 	}
 
+	// Stash-loss warning (gt-eflz): nuclear removal bypasses the git-state
+	// guardrail, and stashes do NOT survive worktree deletion — unlike commits,
+	// which Step 2.75 best-effort pushes. Warn loudly so an explicit human nuke
+	// doesn't silently drop work. Best-effort; never blocks (--force already
+	// means "I accept data loss").
+	if polecatInfo != nil && polecatInfo.ClonePath != "" {
+		if _, statErr := os.Stat(polecatInfo.ClonePath); statErr == nil {
+			if n, scErr := git.NewGit(polecatInfo.ClonePath).StashCount(); scErr == nil && n > 0 {
+				fmt.Printf("  %s %s has %d stash(es) that will be PERMANENTLY LOST — stashes do not survive worktree deletion\n",
+					style.Warning.Render("⚠"), polecatName, n)
+			}
+		}
+	}
+
 	// Step 3: Delete worktree (nuclear=true to bypass safety checks for stale polecats)
 	if err := mgr.RemoveWithOptions(polecatName, true, true, false); err != nil {
 		if errors.Is(err, polecat.ErrPolecatNotFound) {

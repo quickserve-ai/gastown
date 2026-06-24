@@ -2179,6 +2179,25 @@ func (g *Git) UnpushedCommits() (int, error) {
 	return count, nil
 }
 
+// LocalOnlyCommits counts commits reachable from any local branch but not from
+// any remote-tracking ref (`git rev-list --count --branches --not --remotes`).
+// Unlike UnpushedCommits — which returns 0 when the current branch has no
+// upstream configured — this catches commits on an upstream-less polecat branch
+// that exist on NO remote. That class (e.g. a stuck polecat that committed but
+// never pushed) is destroyed if the worktree is removed, so destructive paths
+// must treat it as dirty. Best-effort: returns 0 with an error if git fails.
+func (g *Git) LocalOnlyCommits() (int, error) {
+	out, err := g.run("rev-list", "--count", "--branches", "--not", "--remotes")
+	if err != nil {
+		return 0, fmt.Errorf("counting local-only commits: %w", err)
+	}
+	var count int
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d", &count); err != nil {
+		return 0, fmt.Errorf("parsing local-only commit count: %w", err)
+	}
+	return count, nil
+}
+
 // UncommittedWorkStatus contains information about uncommitted work in a repo.
 type UncommittedWorkStatus struct {
 	HasUncommittedChanges bool

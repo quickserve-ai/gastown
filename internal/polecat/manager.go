@@ -1143,31 +1143,50 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 	// Polecat dir is the parent directory (polecats/<name>/)
 	polecatDir := m.polecatDir(name)
 
-	// Check for uncommitted work unless bypassed
+	// Check for uncommitted work unless bypassed.
+	//
+	// A self-reported cleanup_status (on the agent bead) is a HINT, never a
+	// permit: a stuck polecat — the exact thing a reap targets — can report a
+	// stale "clean" while its worktree still holds work. (gt-eflz: homer reported
+	// cleanup_status=clean while holding 3 stashes + local-only commits; trusting
+	// it would have destroyed that work.) So the FRESH git state is authoritative
+	// for any destructive removal; the bead may only ESCALATE on dirty, never
+	// authorize a removal. Previously a non-Unknown bead status short-circuited
+	// the fresh check — a latent work-loss path, now removed.
 	if !nuclear {
-		// ZFC #10: First try to read cleanup_status from agent bead
-		// This is the ZFC-compliant path - trust what the polecat reported
-		cleanupStatus := m.getCleanupStatusFromBead(name)
-
-		if cleanupStatus != CleanupUnknown {
-			// ZFC path: Use polecat's self-reported status
-			if err := m.checkCleanupStatus(name, cleanupStatus, force); err != nil {
-				return err
+		polecatGit := git.NewGit(clonePath)
+		status, statusErr := polecatGit.CheckUncommittedWork()
+		if statusErr == nil {
+			// UnpushedCommits returns 0 for an upstream-less branch, missing
+			// local-only commits (commits on no remote). Fold in the
+			// remote-reachability check so that class also blocks. Best-effort.
+			if localOnly, lErr := polecatGit.LocalOnlyCommits(); lErr == nil && localOnly > status.UnpushedCommits {
+				status.UnpushedCommits = localOnly
 			}
-		} else {
-			// Fallback path: Check git directly (for polecats that haven't reported yet)
-			polecatGit := git.NewGit(clonePath)
-			status, err := polecatGit.CheckUncommittedWork()
-			if err == nil && !status.Clean() {
+			if !status.Clean() {
 				if force {
-					// Force mode: bypass uncommitted changes and unpushed commits.
-					// Only block on stashes, which represent intentional work-in-progress.
+					// Force bypasses uncommitted changes + unpushed/local-only
+					// commits, but NEVER stashes — intentional work-in-progress
+					// that survives nothing once the worktree is deleted.
 					if status.StashCount > 0 {
 						return &UncommittedWorkError{PolecatName: name, Status: status}
 					}
 				} else {
 					return &UncommittedWorkError{PolecatName: name, Status: status}
 				}
+			}
+		} else {
+			// Fresh check failed (e.g. the worktree is already gone). Fall back
+			// to the self-reported bead status so a reported-dirty polecat still
+			// blocks, and refuse a non-forced removal when the state is truly
+			// unknown rather than risk silent work loss.
+			cleanupStatus := m.getCleanupStatusFromBead(name)
+			if cleanupStatus != CleanupUnknown {
+				if err := m.checkCleanupStatus(name, cleanupStatus, force); err != nil {
+					return err
+				}
+			} else if !force {
+				return fmt.Errorf("cannot verify git state for polecat %s: %w (use --force to override, risks data loss)", name, statusErr)
 			}
 		}
 	}

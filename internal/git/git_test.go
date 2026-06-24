@@ -2487,3 +2487,59 @@ func installFakeGH(t *testing.T, script string) string {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return logPath
 }
+
+// TestLocalOnlyCommits verifies detection of commits reachable from a local
+// branch but no remote — the "commits on no remote" class that UnpushedCommits
+// misses on an upstream-less branch (gt-eflz: the destructive-removal guardrail
+// must treat these as dirty so a stuck polecat's local work isn't nuked).
+func TestLocalOnlyCommits(t *testing.T) {
+	dir := initTestRepo(t) // 1 commit, no remote
+	g := NewGit(dir)
+
+	runGitT := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	branch := func() string {
+		c := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		c.Dir = dir
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("rev-parse HEAD: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	// No remote yet: the commit is on no remote → local-only.
+	if n, err := g.LocalOnlyCommits(); err != nil || n < 1 {
+		t.Fatalf("no remote: LocalOnlyCommits = %d, err=%v; want >=1", n, err)
+	}
+
+	// Add a bare remote and push → commit now reachable from a remote ref.
+	remote := t.TempDir()
+	if out, err := exec.Command("git", "init", "--bare", remote).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	runGitT("remote", "add", "origin", remote)
+	runGitT("push", "origin", branch())
+	runGitT("fetch", "origin")
+
+	if n, err := g.LocalOnlyCommits(); err != nil || n != 0 {
+		t.Fatalf("after push: LocalOnlyCommits = %d, err=%v; want 0", n, err)
+	}
+
+	// New local commit, NOT pushed (and no upstream tracking) → local-only.
+	// This is the exact case UnpushedCommits() would report as 0.
+	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT("add", ".")
+	runGitT("commit", "-m", "local-only work")
+	if n, err := g.LocalOnlyCommits(); err != nil || n != 1 {
+		t.Fatalf("after unpushed commit: LocalOnlyCommits = %d, err=%v; want 1", n, err)
+	}
+}

@@ -56,6 +56,84 @@ func TestSessionStatusCmdJSONFlagWiring(t *testing.T) {
 	}
 }
 
+// TestSessionListItemTransportFields verifies the additive observability fields
+// (gt-eflz) serialize under the documented keys. These feed the witness-patrol
+// formula's reap decision; git_state is the work-preservation guardrail.
+func TestSessionListItemTransportFields(t *testing.T) {
+	la := time.Date(2026, 6, 24, 9, 0, 0, 0, time.UTC)
+	item := SessionListItem{
+		Rig:          "gastown",
+		Polecat:      "furiosa",
+		SessionID:    "gt-furiosa",
+		Running:      true,
+		AgentState:   "idle",
+		HookBead:     "", // no work bead → the stuck/idle condition
+		NoWorkBead:   true,
+		GitState:     "clean",
+		LastActivity: &la,
+		IdleSeconds:  3600,
+	}
+
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if m["agent_state"] != "idle" {
+		t.Errorf("agent_state = %v, want idle", m["agent_state"])
+	}
+	if m["no_work_bead"] != true {
+		t.Errorf("no_work_bead = %v, want true", m["no_work_bead"])
+	}
+	if m["git_state"] != "clean" {
+		t.Errorf("git_state = %v, want clean (the reap guardrail)", m["git_state"])
+	}
+	if _, ok := m["last_activity"]; !ok {
+		t.Error("last_activity missing")
+	}
+	if v, ok := m["idle_seconds"].(float64); !ok || v != 3600 {
+		t.Errorf("idle_seconds = %v, want 3600", m["idle_seconds"])
+	}
+	// hook_bead is omitempty: absent when empty.
+	if _, ok := m["hook_bead"]; ok {
+		t.Error("hook_bead should be omitted when empty")
+	}
+}
+
+// TestSessionListItemOmitsEmptyState verifies optional state fields are omitted
+// when the agent bead is unreadable, but no_work_bead is ALWAYS present so the
+// guardrail/condition is never silently absent.
+func TestSessionListItemOmitsEmptyState(t *testing.T) {
+	item := SessionListItem{Rig: "r", Polecat: "p", SessionID: "s", Running: true}
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	for _, k := range []string{"agent_state", "git_state", "hook_bead", "last_activity"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("%s should be omitted when empty", k)
+		}
+	}
+	if _, ok := m["no_work_bead"]; !ok {
+		t.Error("no_work_bead must always be present")
+	}
+}
+
+func TestSessionListCmdJSONFlagWiring(t *testing.T) {
+	f := sessionListCmd.Flags().Lookup("json")
+	if f == nil {
+		t.Fatal("session list command missing --json flag")
+	}
+}
+
 func TestSessionInfoJSONOutputNotRunning(t *testing.T) {
 	info := &polecat.SessionInfo{
 		Polecat:   "beta",

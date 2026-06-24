@@ -351,11 +351,34 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 }
 
 // SessionListItem represents a session in list output.
+//
+// The fields below "Running" are additive observability transport (gt-eflz):
+// they expose per-session state so the witness-patrol formula and operators can
+// reason about idle / no-work / stuck sessions. ZFC: this is data only — the
+// reap/escalate POLICY lives in the witness formula, never here. GitState is the
+// load-bearing guardrail signal (a reap must preserve work: only "clean" sessions
+// are safe to nuke; anything else must be escalated).
 type SessionListItem struct {
 	Rig       string `json:"rig"`
 	Polecat   string `json:"polecat"`
 	SessionID string `json:"session_id"`
 	Running   bool   `json:"running"`
+
+	// Per-session agent state (from the polecat's agent bead). Empty when the
+	// bead is unreadable/absent.
+	AgentState string `json:"agent_state,omitempty"`
+	HookBead   string `json:"hook_bead,omitempty"`
+	// NoWorkBead is true when the session is running with no hooked work bead —
+	// the "running but idle/no-work" condition that fell through reap detection.
+	NoWorkBead bool `json:"no_work_bead"`
+	// GitState is the polecat's self-reported git cleanliness (clean,
+	// has_uncommitted, has_stash, has_unpushed, unknown). The reap guardrail.
+	GitState string `json:"git_state,omitempty"`
+
+	// LastActivity is the tmux session's last activity time; IdleSeconds is the
+	// derived idle duration. Zero/omitted when unavailable.
+	LastActivity *time.Time `json:"last_activity,omitempty"`
+	IdleSeconds  int64      `json:"idle_seconds,omitempty"`
 }
 
 func runSessionList(cmd *cobra.Command, args []string) error {
@@ -402,13 +425,36 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// Manager (with beads access) for per-session agent-bead enrichment.
+		// Best-effort: a nil/failed read just leaves the extra fields empty.
+		agentMgr := polecat.NewManager(r, git.NewGit(r.Path), t)
+
 		for _, info := range infos {
-			allSessions = append(allSessions, SessionListItem{
+			item := SessionListItem{
 				Rig:       r.Name,
 				Polecat:   info.Polecat,
 				SessionID: info.SessionID,
 				Running:   info.Running,
-			})
+			}
+
+			if fields := agentMgr.AgentFields(info.Polecat); fields != nil {
+				item.AgentState = fields.AgentState
+				item.HookBead = fields.HookBead
+				item.GitState = fields.CleanupStatus
+			}
+			// no_work_bead: a running session with no hooked work bead — the
+			// idle/no-work condition that needs the witness formula's attention.
+			item.NoWorkBead = info.Running && item.HookBead == ""
+
+			if !info.LastActivity.IsZero() {
+				la := info.LastActivity
+				item.LastActivity = &la
+				if secs := int64(time.Since(la).Seconds()); secs > 0 {
+					item.IdleSeconds = secs
+				}
+			}
+
+			allSessions = append(allSessions, item)
 		}
 	}
 

@@ -406,6 +406,19 @@ func (m *Manager) getCleanupStatusFromBead(name string) CleanupStatus {
 	return CleanupStatus(fields.CleanupStatus)
 }
 
+// AgentFields reads the polecat's agent bead and returns its parsed fields
+// (agent_state, hook_bead, cleanup_status, etc.). Returns nil if the bead does
+// not exist or cannot be read. Read-only; used by observability surfaces such as
+// `gt session list --json` so the witness formula and operators can reason about
+// idle/no-work/stuck sessions (gt-eflz). Transport only — no policy here.
+func (m *Manager) AgentFields(name string) *beads.AgentFields {
+	_, fields, err := m.beads.GetAgentBead(m.agentBeadID(name))
+	if err != nil {
+		return nil
+	}
+	return fields
+}
+
 // checkCleanupStatus validates the cleanup status against removal safety rules.
 // Returns an error if removal should be blocked based on the status.
 // force=true: allow has_uncommitted and has_unpushed, block has_stash

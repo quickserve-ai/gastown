@@ -2179,15 +2179,24 @@ func (g *Git) UnpushedCommits() (int, error) {
 	return count, nil
 }
 
-// LocalOnlyCommits counts commits reachable from any local branch but not from
-// any remote-tracking ref (`git rev-list --count --branches --not --remotes`).
-// Unlike UnpushedCommits — which returns 0 when the current branch has no
-// upstream configured — this catches commits on an upstream-less polecat branch
-// that exist on NO remote. That class (e.g. a stuck polecat that committed but
-// never pushed) is destroyed if the worktree is removed, so destructive paths
-// must treat it as dirty. Best-effort: returns 0 with an error if git fails.
+// LocalOnlyCommits counts commits reachable from this worktree's HEAD but not
+// from any remote-tracking ref (`git rev-list --count HEAD --not --remotes`).
+// Unlike UnpushedCommits — which returns 0 when HEAD has no upstream configured
+// — this catches commits on an upstream-less branch that exist on NO remote
+// (e.g. a stuck polecat that committed but never pushed); that class is
+// destroyed if the worktree is removed, so destructive paths must treat it as
+// dirty.
+//
+// Scoped to HEAD on purpose, NOT --branches: polecat worktrees share one common
+// .repo.git, so refs/heads is shared across every worktree. A --branches scan
+// would count EVERY branch's local-only commits (other polecats', experimental
+// branches), making this >0 for every worktree the moment any shared branch has
+// an unpushed commit — which would block all removals and defeat reaping (the
+// very accumulation this fixes). HEAD is per-worktree, so this measures only
+// this polecat's own work branch. Best-effort: returns 0 with an error if git
+// fails.
 func (g *Git) LocalOnlyCommits() (int, error) {
-	out, err := g.run("rev-list", "--count", "--branches", "--not", "--remotes")
+	out, err := g.run("rev-list", "--count", "HEAD", "--not", "--remotes")
 	if err != nil {
 		return 0, fmt.Errorf("counting local-only commits: %w", err)
 	}

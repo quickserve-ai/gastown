@@ -2542,4 +2542,22 @@ func TestLocalOnlyCommits(t *testing.T) {
 	if n, err := g.LocalOnlyCommits(); err != nil || n != 1 {
 		t.Fatalf("after unpushed commit: LocalOnlyCommits = %d, err=%v; want 1", n, err)
 	}
+
+	// HEAD-scoping guard (gt-eflz review): a SIBLING branch with its own
+	// local-only commit must NOT be counted — polecat worktrees share refs/heads,
+	// so a --branches scan would wrongly count every other branch's local work
+	// and block every removal. Create a sibling off the pushed base, commit on
+	// it, switch back to the work branch, and confirm the count stays 1 (only
+	// HEAD's commit), not 2.
+	work := branch()
+	runGitT("checkout", "-b", "sibling", "origin/"+work)
+	if err := os.WriteFile(filepath.Join(dir, "sibling.txt"), []byte("y\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitT("add", ".")
+	runGitT("commit", "-m", "sibling local-only work")
+	runGitT("checkout", work)
+	if n, err := g.LocalOnlyCommits(); err != nil || n != 1 {
+		t.Fatalf("with sibling branch: LocalOnlyCommits = %d, err=%v; want 1 (HEAD-scoped, sibling excluded)", n, err)
+	}
 }

@@ -446,9 +446,17 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			// idle/no-work condition that needs the witness formula's attention.
 			item.NoWorkBead = info.Running && item.HookBead == ""
 
-			if !info.LastActivity.IsZero() {
-				la := info.LastActivity
-				item.LastActivity = &la
+			// SessionManager.List() doesn't populate LastActivity, so fetch the
+			// tmux activity timestamp directly. Best-effort: skip on error.
+			la := info.LastActivity
+			if la.IsZero() {
+				if act, err := t.GetSessionActivity(info.SessionID); err == nil {
+					la = act
+				}
+			}
+			if !la.IsZero() {
+				laCopy := la
+				item.LastActivity = &laCopy
 				if secs := int64(time.Since(la).Seconds()); secs > 0 {
 					item.IdleSeconds = secs
 				}

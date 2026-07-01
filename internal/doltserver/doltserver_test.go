@@ -3652,6 +3652,46 @@ func TestBuildDoltSQLCmd_RemoteNoPassword(t *testing.T) {
 	t.Error("remote cmd without password should set empty DOLT_CLI_PASSWORD env var")
 }
 
+// doltServerEnv must force the detached server's git federation onto a dedicated
+// deploy key when one exists (so a launchd daemon never depends on the 1Password
+// SSH agent / login keychain it can't reach), and be a no-op otherwise (gt-b5t9).
+func TestDoltServerEnv_DeployKey(t *testing.T) {
+	t.Run("missing key → no GIT_SSH_COMMAND added", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "absent_key")
+		t.Setenv("GT_DOLT_DEPLOY_KEY", missing)
+		for _, e := range doltServerEnv() {
+			// A pre-existing GIT_SSH_COMMAND from the real env is out of scope;
+			// only fail if we wired in our (missing) key.
+			if strings.HasPrefix(e, "GIT_SSH_COMMAND=") && strings.Contains(e, missing) {
+				t.Errorf("should not set GIT_SSH_COMMAND for a missing deploy key: %q", e)
+			}
+		}
+	})
+
+	t.Run("key present → forces deploy key, no agent", func(t *testing.T) {
+		keyPath := filepath.Join(t.TempDir(), DefaultDoltDeployKeyName)
+		if err := os.WriteFile(keyPath, []byte("fake"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GT_DOLT_DEPLOY_KEY", keyPath)
+
+		var got string
+		for _, e := range doltServerEnv() {
+			if strings.HasPrefix(e, "GIT_SSH_COMMAND=") {
+				got = e // ours is appended last, so it wins over any inherited one
+			}
+		}
+		if got == "" {
+			t.Fatal("expected GIT_SSH_COMMAND when a deploy key exists")
+		}
+		for _, want := range []string{keyPath, "IdentitiesOnly=yes", "IdentityAgent=none"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("GIT_SSH_COMMAND %q missing %q", got, want)
+			}
+		}
+	})
+}
+
 // =============================================================================
 // WaitForReady tests (gt-zou1n)
 // =============================================================================

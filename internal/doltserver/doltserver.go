@@ -1593,6 +1593,15 @@ func Start(townRoot string) error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
+	// The server is long-running and detached (it reparents to launchd), so its
+	// Dolt federation push/pull over SSH must authenticate WITHOUT any GUI-only
+	// credential source. A daemon cannot use the 1Password SSH agent or the login
+	// keychain, so an inherited SSH_AUTH_SOCK pointing at 1Password leaves every
+	// git+ssh remote op failing "publickey denied" (gt-b5t9). doltServerEnv
+	// overrides GIT_SSH_COMMAND to use a dedicated passphrase-less deploy key when
+	// one is present — no agent, no keychain — which is headless-durable.
+	cmd.Env = doltServerEnv()
+
 	// Detach from terminal and put dolt in its own process group so that
 	// signals sent to the parent process group (e.g. SIGHUP when the caller
 	// calls syscall.Exec to become tmux) don't reach the dolt server.
@@ -1706,6 +1715,44 @@ func Start(townRoot string) error {
 //
 // cleanupStaleDoltLock previously removed stale .dolt/noms/LOCK files.
 // This was unsafe — Dolt manages its own lock files on startup.
+
+// DefaultDoltDeployKeyName is the conventional filename (under ~/.ssh) of the
+// dedicated passphrase-less key the detached Dolt server uses for git+ssh
+// federation, so remote push/pull never depends on a GUI credential source
+// (1Password SSH agent / login keychain). Override with GT_DOLT_DEPLOY_KEY.
+const DefaultDoltDeployKeyName = "gt_dolt_deploy"
+
+// doltServerEnv builds the environment for the long-running, detached Dolt
+// server. It inherits the parent env, but when a dedicated deploy key exists it
+// overrides GIT_SSH_COMMAND so the server's git federation subprocesses
+// authenticate with THAT key alone — IdentitiesOnly so no other key is offered,
+// IdentityAgent=none so the inherited (1Password) SSH agent is ignored entirely.
+// This is the only way git+ssh push/pull works from a launchd daemon, which can
+// reach neither the 1Password agent nor the login keychain (gt-b5t9).
+//
+// Gated on the key's presence: with no deploy key the env is returned unchanged,
+// so this is a no-op for any town/host that hasn't provisioned one.
+func doltServerEnv() []string {
+	env := os.Environ()
+
+	keyPath := os.Getenv("GT_DOLT_DEPLOY_KEY")
+	if keyPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return env
+		}
+		keyPath = filepath.Join(home, ".ssh", DefaultDoltDeployKeyName)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		return env // no deploy key provisioned → inherit env unchanged
+	}
+
+	gitSSH := fmt.Sprintf(
+		"ssh -i %s -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=accept-new",
+		keyPath,
+	)
+	return append(env, "GIT_SSH_COMMAND="+gitSSH)
+}
 
 // DefaultDoltSocketPath is the default Unix socket Dolt creates.
 const DefaultDoltSocketPath = "/tmp/mysql.sock"

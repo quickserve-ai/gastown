@@ -105,11 +105,33 @@ type SessionInfo struct {
 	LastActivity time.Time `json:"last_activity,omitempty"`
 }
 
+// rigPrefix returns the beads prefix for this manager's rig, preferring the
+// rig object's own config over the global prefix registry.
+//
+// The global DefaultRegistry is only populated when session.InitRegistry ran,
+// which the CLI gates on detecting the town root from the CWD (root.go). A
+// command invoked from a worktree/path the detector doesn't recognize leaves
+// the registry empty, so session.PrefixFor falls back to DefaultPrefix ("gt")
+// and computes a wrong session name for a non-gt rig — e.g. "gt-marge" instead
+// of the real "qc-marge". The rig object, by contrast, is loaded directly from
+// rigs.json whenever a polecat command runs, so r.Config.Prefix is authoritative
+// here. Preferring it makes the computed session name correct regardless of
+// registry state — the F3 half of the gt-eflz failed-nuke fix. Falls back to the
+// registry (then DefaultPrefix) only when the rig carries no configured prefix.
+func (m *SessionManager) rigPrefix() string {
+	if m.rig != nil && m.rig.Config != nil {
+		if p := strings.TrimSuffix(m.rig.Config.Prefix, "-"); p != "" {
+			return p
+		}
+	}
+	return session.PrefixFor(m.rig.Name)
+}
+
 // SessionName generates the tmux session name for a polecat.
 // Validates that the polecat name doesn't contain the rig prefix to prevent
 // double-prefix bugs (e.g., "gt-gastown_manager-gastown_manager-142").
 func (m *SessionManager) SessionName(polecat string) string {
-	sessionName := session.PolecatSessionName(session.PrefixFor(m.rig.Name), polecat)
+	sessionName := session.PolecatSessionName(m.rigPrefix(), polecat)
 
 	// Validate session name format to detect double-prefix bugs
 	if err := validateSessionName(sessionName, m.rig.Name); err != nil {
@@ -659,6 +681,93 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 	return nil
 }
 
+// DiscoverSessions returns every live tmux session that belongs to (this rig,
+// polecat), regardless of how the prefix resolved when the session was spawned.
+//
+// SessionName computes a single expected name; if the prefix was resolved
+// differently at spawn time vs now (empty registry -> "gt" fallback) or under a
+// legacy naming scheme, that computed name misses the real session — the
+// gt-eflz failed-nuke class where a nuke marks the agent bead "nuked" while the
+// session lives on (marge: state=nuked, session alive 44h). Enumerating live
+// sessions and matching by parsed identity closes that gap. This is the F2 half
+// of the fix; the nuke path kills whatever this finds.
+//
+// Returns nil (not an error) when tmux is unreachable — callers that need to
+// distinguish "none found" from "could not check" use IsAnySessionLive, which
+// is fail-safe on probe errors.
+func (m *SessionManager) DiscoverSessions(polecat string) []string {
+	all, err := m.tmux.ListSessions()
+	if err != nil {
+		return nil
+	}
+	return m.discoverSessionsFrom(all, polecat)
+}
+
+// discoverSessionsFrom is the pure core of DiscoverSessions: given a list of
+// live session names, it returns those belonging to (this rig, polecat). Split
+// out so it can be unit-tested without a tmux server and reused by the
+// error-aware IsAnySessionLive.
+func (m *SessionManager) discoverSessionsFrom(all []string, polecat string) []string {
+	if len(all) == 0 {
+		return nil
+	}
+
+	// A registry that always knows THIS rig's prefix, even when the global
+	// DefaultRegistry is empty (command invoked outside the detected town tree).
+	// Scoping to this one rig means a same-named polecat in a *different* rig
+	// (e.g. gastown's "gt-marge" when we target qcore/marge) is correctly NOT
+	// matched — we only kill sessions that resolve to our own rig.
+	reg := session.NewPrefixRegistry()
+	if p := m.rigPrefix(); p != "" {
+		reg.Register(p, m.rig.Name)
+	}
+
+	// Match strictly on the parsed identity — Role must be polecat. We do NOT
+	// short-circuit on a computed-name string equality, because a reserved
+	// suffix (a "polecat" literally named witness/refinery/crew-*) would collide
+	// with a role session's name; the parse correctly classifies those as roles,
+	// never as this polecat, so we never kill a witness/refinery/crew session.
+	seen := make(map[string]bool)
+	var found []string
+	for _, s := range all {
+		if seen[s] {
+			continue
+		}
+		id, err := session.ParseSessionNameWithRegistry(s, reg)
+		if err != nil {
+			continue
+		}
+		if id.Role == session.RolePolecat && id.Rig == m.rig.Name && id.Name == polecat {
+			seen[s] = true
+			found = append(found, s)
+		}
+	}
+	return found
+}
+
+// IsAnySessionLive reports whether any tmux session for the polecat may still be
+// alive — the computed name OR any session found by discovery.
+//
+// The nuke path calls this AFTER attempting the kill: the agent bead must never
+// be marked "nuked" while a session survives (the gt-eflz failed-nuke lie). It
+// is deliberately FAIL-SAFE — if liveness cannot be determined because a tmux
+// probe errors, it returns true so the caller does NOT mark the bead nuked on
+// uncertainty. This is the F1 verify-then-mark invariant's liveness check.
+func (m *SessionManager) IsAnySessionLive(polecat string) bool {
+	live, err := m.tmux.HasSession(m.SessionName(polecat))
+	if err != nil {
+		return true // cannot confirm death -> treat as alive (fail-safe)
+	}
+	if live {
+		return true
+	}
+	all, err := m.tmux.ListSessions()
+	if err != nil {
+		return true // cannot enumerate -> treat as alive (fail-safe)
+	}
+	return len(m.discoverSessionsFrom(all, polecat)) > 0
+}
+
 // IsRunning checks if a polecat session is active and healthy.
 // Checks both tmux session existence AND agent process liveness to avoid
 // reporting zombie sessions (tmux alive but Claude dead) as "running".
@@ -731,7 +840,7 @@ func (m *SessionManager) List() ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	prefix := session.PrefixFor(m.rig.Name) + "-"
+	prefix := m.rigPrefix() + "-"
 	var infos []SessionInfo
 
 	for _, sessionID := range sessions {

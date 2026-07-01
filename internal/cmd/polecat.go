@@ -1325,6 +1325,31 @@ func nukePolecatFull(polecatName, rigName string, mgr *polecat.Manager, r *rig.R
 		fmt.Printf("  %s killed session\n", style.Success.Render("✓"))
 	}
 
+	// Step 1.5 (gt-eflz F2): kill by DISCOVERY, not just the computed name.
+	// Stop() targets a single computed SessionName; a prefix miss (empty
+	// registry -> "gt" fallback) or a legacy name means that computed target may
+	// not exist while the REAL session (e.g. "qc-marge") survives untouched.
+	// Enumerate live sessions and kill any that actually belong to this polecat.
+	for _, sid := range sessMgr.DiscoverSessions(polecatName) {
+		if err := t.KillSessionWithProcesses(sid); err != nil {
+			fmt.Printf("  %s discovered-session kill failed (%s): %v\n", style.Warning.Render("⚠"), sid, err)
+		} else {
+			fmt.Printf("  %s killed discovered session %s\n", style.Success.Render("✓"), sid)
+		}
+	}
+
+	// Step 1.75 (gt-eflz F1): verify-then-mark invariant. Never destroy the
+	// worktree/branch or mark the agent bead "nuked" while a session is still
+	// alive — that permanent-zombie lie (state=nuked + session alive 44h, cf.
+	// marge) is the failed-nuke bug this fixes. If the kill did not land, abort
+	// BEFORE any destructive step and surface it so the caller (a human, or the
+	// witness reap formula) can escalate or retry. IsAnySessionLive is fail-safe:
+	// on an inconclusive tmux probe it reports alive, so we refuse to lie.
+	if sessMgr.IsAnySessionLive(polecatName) {
+		return fmt.Errorf("nuke aborted: %s/%s session still alive after kill attempts — "+
+			"agent bead NOT marked nuked (escalate or retry)", rigName, polecatName)
+	}
+
 	// Step 2: Get polecat info before deletion (for branch name + hooked work bead)
 	polecatInfo, getErr := mgr.Get(polecatName)
 	var branchToDelete string

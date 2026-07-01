@@ -693,6 +693,137 @@ func TestValidateSessionName(t *testing.T) {
 	}
 }
 
+// TestRigPrefix_PrefersRigConfig verifies rigPrefix() resolves the prefix from
+// the rig object's own config even when the global registry is empty (the
+// gt-eflz F3 fix), and falls back to the registry only when the rig carries no
+// configured prefix. The trailing hyphen stored in rigs.json ("qc-") is
+// stripped.
+func TestRigPrefix_PrefersRigConfig(t *testing.T) {
+	// Empty global registry: PrefixFor(anything) would return DefaultPrefix "gt".
+	old := session.DefaultRegistry()
+	session.SetDefaultRegistry(session.NewPrefixRegistry())
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+
+	// Rig carries its own prefix -> used verbatim (dash stripped), NOT "gt".
+	withConfig := NewSessionManager(tmux.NewTmux(), &rig.Rig{
+		Name:   "qcore",
+		Config: &config.BeadsConfig{Prefix: "qc-"},
+	})
+	if got := withConfig.rigPrefix(); got != "qc" {
+		t.Errorf("rigPrefix() with config = %q, want qc", got)
+	}
+
+	// No config -> fall back to the (empty) registry's DefaultPrefix.
+	noConfig := NewSessionManager(tmux.NewTmux(), &rig.Rig{Name: "qcore"})
+	if got := noConfig.rigPrefix(); got != session.DefaultPrefix {
+		t.Errorf("rigPrefix() without config = %q, want %q", got, session.DefaultPrefix)
+	}
+
+	// Registry populated but Config still wins (Config is authoritative).
+	reg := session.NewPrefixRegistry()
+	reg.Register("zz", "qcore") // deliberately wrong to prove Config wins
+	session.SetDefaultRegistry(reg)
+	if got := withConfig.rigPrefix(); got != "qc" {
+		t.Errorf("rigPrefix() should prefer Config over registry, got %q want qc", got)
+	}
+}
+
+// TestSessionName_UsesRigConfigPrefix_EmptyRegistry is the direct regression for
+// the failed-nuke root cause: with an empty prefix registry, a non-gt rig's
+// polecat resolved to "gt-<name>" (missing the real session). SessionName must
+// now yield "qc-marge" from the rig object's prefix.
+func TestSessionName_UsesRigConfigPrefix_EmptyRegistry(t *testing.T) {
+	old := session.DefaultRegistry()
+	session.SetDefaultRegistry(session.NewPrefixRegistry())
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+
+	m := NewSessionManager(tmux.NewTmux(), &rig.Rig{
+		Name:   "qcore",
+		Config: &config.BeadsConfig{Prefix: "qc-"},
+	})
+	if got := m.SessionName("marge"); got != "qc-marge" {
+		t.Errorf("SessionName(marge) = %q, want qc-marge (regression: empty registry must not fall back to gt-)", got)
+	}
+}
+
+// TestDiscoverSessionsFrom verifies the pure discovery core matches only
+// sessions belonging to (this rig, polecat) — even with an empty global
+// registry — and correctly excludes other rigs, witness/refinery/crew roles,
+// and unrelated sessions. This is the gt-eflz F2 kill-by-discovery basis.
+func TestDiscoverSessionsFrom(t *testing.T) {
+	// Empty global registry to prove the rig-local registry drives matching.
+	old := session.DefaultRegistry()
+	session.SetDefaultRegistry(session.NewPrefixRegistry())
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+
+	m := NewSessionManager(tmux.NewTmux(), &rig.Rig{
+		Name:   "qcore",
+		Config: &config.BeadsConfig{Prefix: "qc-"},
+	})
+
+	live := []string{
+		"qc-marge",       // target polecat (correct prefix)
+		"gt-marge",       // different rig, same name -> must NOT match
+		"qc-witness",     // witness role -> excluded
+		"qc-refinery",    // refinery role -> excluded
+		"qc-crew-bob",    // crew role -> excluded
+		"hq-mayor",       // town-level -> excluded
+		"qc-furiosa",     // other polecat -> only matches its own name
+		"qc-foo-bar",     // hyphenated polecat name
+		"unrelated-thing",
+	}
+
+	tests := []struct {
+		polecat string
+		want    []string
+	}{
+		{"marge", []string{"qc-marge"}},
+		{"furiosa", []string{"qc-furiosa"}},
+		{"foo-bar", []string{"qc-foo-bar"}},
+		{"nonexistent", nil},
+		{"witness", nil}, // must not resolve a role session as a polecat
+	}
+
+	for _, tc := range tests {
+		got := m.discoverSessionsFrom(live, tc.polecat)
+		if len(got) != len(tc.want) {
+			t.Errorf("discoverSessionsFrom(%q) = %v, want %v", tc.polecat, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("discoverSessionsFrom(%q)[%d] = %q, want %q", tc.polecat, i, got[i], tc.want[i])
+			}
+		}
+	}
+
+	// Empty session list is safe.
+	if got := m.discoverSessionsFrom(nil, "marge"); got != nil {
+		t.Errorf("discoverSessionsFrom(nil) = %v, want nil", got)
+	}
+}
+
+// TestIsAnySessionLive_NoSession verifies the happy-path liveness check returns
+// false when no session exists (used by the nuke path to confirm the kill
+// landed before marking the bead nuked).
+func TestIsAnySessionLive_NoSession(t *testing.T) {
+	requireTmux(t)
+
+	// Unique prefix so neither the computed name nor discovery matches any real
+	// running session.
+	old := session.DefaultRegistry()
+	session.SetDefaultRegistry(session.NewPrefixRegistry())
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+
+	m := NewSessionManager(tmux.NewTmux(), &rig.Rig{
+		Name:   "test-rig-unlikely-name",
+		Config: &config.BeadsConfig{Prefix: "xzq-"},
+	})
+	if m.IsAnySessionLive("no-such-polecat") {
+		t.Error("IsAnySessionLive = true for non-existent session, want false")
+	}
+}
+
 func TestPolecatSlot(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigPath := tmpDir

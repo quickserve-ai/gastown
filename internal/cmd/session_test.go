@@ -117,7 +117,7 @@ func TestSessionListItemOmitsEmptyState(t *testing.T) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatalf("json.Unmarshal failed: %v", err)
 	}
-	for _, k := range []string{"agent_state", "git_state", "hook_bead", "last_activity"} {
+	for _, k := range []string{"agent_state", "git_state", "hook_bead", "last_activity", "active_mr", "cpu_pct"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("%s should be omitted when empty", k)
 		}
@@ -131,6 +131,43 @@ func TestSessionListCmdJSONFlagWiring(t *testing.T) {
 	f := sessionListCmd.Flags().Lookup("json")
 	if f == nil {
 		t.Fatal("session list command missing --json flag")
+	}
+}
+
+// subtreeCPU must sum the pane process + ALL descendants (across process-group
+// boundaries) and exclude unrelated trees — the whole reason it walks by PPID
+// instead of `ps -g <pgid>`, which misses subprocesses the shell puts in their
+// own groups for job control (gt-eflz Phase 1.5).
+func TestSubtreeCPU(t *testing.T) {
+	// 100 -> {200, 300}; 300 -> {400}. 400 models a job-control-detached
+	// subprocess a pgid-sum would miss. 999 is an unrelated tree.
+	snap := &procSnapshot{
+		cpu: map[int]float64{100: 1.0, 200: 2.0, 300: 3.0, 400: 4.0, 999: 50.0},
+		children: map[int][]int{
+			100: {200, 300},
+			300: {400},
+		},
+	}
+	if got := snap.subtreeCPU(100); got != 10.0 { // 1+2+3+4, excludes 999
+		t.Errorf("subtreeCPU(100) = %v, want 10.0 (must include descendants, exclude unrelated)", got)
+	}
+	if got := snap.subtreeCPU(300); got != 7.0 { // 3+4
+		t.Errorf("subtreeCPU(300) = %v, want 7.0", got)
+	}
+
+	// nil snapshot -> 0 (best-effort, no panic).
+	var nilSnap *procSnapshot
+	if got := nilSnap.subtreeCPU(100); got != 0 {
+		t.Errorf("nil subtreeCPU = %v, want 0", got)
+	}
+
+	// A pid-reuse cycle in the snapshot must not infinite-loop.
+	cyc := &procSnapshot{
+		cpu:      map[int]float64{100: 1.0, 200: 2.0},
+		children: map[int][]int{100: {200}, 200: {100}},
+	}
+	if got := cyc.subtreeCPU(100); got != 3.0 {
+		t.Errorf("cyclic subtreeCPU = %v, want 3.0 (cycle guard)", got)
 	}
 }
 

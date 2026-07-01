@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -379,6 +380,16 @@ type SessionListItem struct {
 	// derived idle duration. Zero/omitted when unavailable.
 	LastActivity *time.Time `json:"last_activity,omitempty"`
 	IdleSeconds  int64      `json:"idle_seconds,omitempty"`
+
+	// ActiveMR is the polecat's pending merge-request bead, if any. A session
+	// with an active MR must NOT be reaped (the refinery needs its branch).
+	ActiveMR string `json:"active_mr,omitempty"`
+	// CPUPct is the total CPU% of the session's process subtree (pane process +
+	// all descendants), sampled only in --json mode (best-effort; 0/omitted on
+	// error). Distinguishes a spin-looping stuck polecat (high CPU) from a
+	// quietly-idle one — the spinning class that idle_seconds alone misses
+	// (gt-eflz Phase 1.5).
+	CPUPct float64 `json:"cpu_pct,omitempty"`
 }
 
 func runSessionList(cmd *cobra.Command, args []string) error {
@@ -418,6 +429,14 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 	var allSessions []SessionListItem
 
+	// One process snapshot for the whole listing (json/diagnostic path only):
+	// cheaper than per-session ps calls and lets subtree CPU be attributed
+	// accurately. Best-effort — a nil snapshot just yields cpu_pct=0.
+	var procSnap *procSnapshot
+	if sessionListJSON {
+		procSnap = snapshotProcesses()
+	}
+
 	for _, r := range rigs {
 		polecatMgr := polecat.NewSessionManager(t, r)
 		infos, err := polecatMgr.List()
@@ -441,6 +460,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				item.AgentState = fields.AgentState
 				item.HookBead = fields.HookBead
 				item.GitState = fields.CleanupStatus
+				item.ActiveMR = fields.ActiveMR
 			}
 			// no_work_bead: a running session with no hooked work bead — the
 			// idle/no-work condition that needs the witness formula's attention.
@@ -460,6 +480,13 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				if secs := int64(time.Since(la).Seconds()); secs > 0 {
 					item.IdleSeconds = secs
 				}
+			}
+
+			// CPU sampling is the spin-vs-idle signal; only do it for the
+			// machine/diagnostic path so the interactive listing stays fast.
+			// Best-effort, off the shared snapshot taken above.
+			if sessionListJSON && info.Running {
+				item.CPUPct = samplePolecatCPU(t, procSnap, info.SessionID)
 			}
 
 			allSessions = append(allSessions, item)
@@ -489,6 +516,86 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// procSnapshot is a single-sweep view of every process, indexed for subtree CPU
+// attribution. Built once per --json listing (one `ps` exec) and shared across
+// sessions, rather than spawning per-session ps calls.
+type procSnapshot struct {
+	cpu      map[int]float64 // pid -> %cpu
+	children map[int][]int   // ppid -> child pids
+}
+
+// snapshotProcesses runs a single `ps` sweep of all processes and indexes them by
+// pid and parent. Returns nil on error; callers treat nil as "no CPU data" (0).
+// The `-axo` form works on both macOS/BSD and Linux ps.
+func snapshotProcesses() *procSnapshot {
+	out, err := exec.Command("ps", "-axo", "pid=,ppid=,%cpu=").Output()
+	if err != nil {
+		return nil
+	}
+	snap := &procSnapshot{cpu: make(map[int]float64), children: make(map[int][]int)}
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		ppid, err2 := strconv.Atoi(f[1])
+		cpu, err3 := strconv.ParseFloat(f[2], 64)
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		snap.cpu[pid] = cpu
+		snap.children[ppid] = append(snap.children[ppid], pid)
+	}
+	return snap
+}
+
+// subtreeCPU sums %cpu across rootPID and all its descendants.
+//
+// A process-GROUP sum (`ps -g <pgid>`) is wrong here: an agent does its work by
+// running subprocesses, and the shell places each job in its OWN process group
+// for job control, so a pgid sum misses nearly all of them — empirically ~20x
+// under-report, and worst exactly for the spin-looping-via-subprocess polecat
+// this signal exists to catch. The PPID subtree walk captures the whole tree.
+func (s *procSnapshot) subtreeCPU(rootPID int) float64 {
+	if s == nil {
+		return 0
+	}
+	var total float64
+	seen := make(map[int]bool)
+	stack := []int{rootPID}
+	for len(stack) > 0 {
+		pid := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[pid] {
+			continue // guard against pid-reuse cycles in the snapshot
+		}
+		seen[pid] = true
+		total += s.cpu[pid]
+		stack = append(stack, s.children[pid]...)
+	}
+	return total
+}
+
+// samplePolecatCPU returns the total CPU% of the session's process subtree (the
+// pane process + all descendants), best-effort: 0 on any error or nil snapshot.
+// This distinguishes a spin-looping stuck polecat (high CPU) from a quietly-idle
+// one — the spinning class that idle_seconds alone misses (gt-eflz Phase 1.5).
+func samplePolecatCPU(t *tmux.Tmux, snap *procSnapshot, sessionID string) float64 {
+	if snap == nil {
+		return 0
+	}
+	pidStr, err := t.GetPanePID(sessionID)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
+	if err != nil {
+		return 0
+	}
+	return snap.subtreeCPU(pid)
 }
 
 func runSessionCapture(cmd *cobra.Command, args []string) error {

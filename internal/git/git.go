@@ -2064,19 +2064,51 @@ func (g *Git) StashCount() (int, error) {
 	// If we can't determine the branch (detached HEAD, error), count all
 	// stashes as a safe fallback — better to over-count than silently lose work.
 	branch, branchErr := g.CurrentBranch()
-	filterByBranch := branchErr == nil && branch != "" && branch != "HEAD"
+	if branchErr != nil {
+		branch = ""
+	}
+	return countStashesForBranch(out, branch), nil
+}
 
-	// Stash reflog lines have the format:
-	//   stash@{N}: WIP on <branch>: <hash> <message>
-	//   stash@{N}: On <branch>: <message>
-	// We anchor the match to ": WIP on <branch>:" or ": On <branch>:" to avoid
-	// false positives from commit messages that happen to contain "on <branch>:".
+// StashCountForBranch counts stashes attributed to the named branch. Stashes are
+// global to the repo but conceptually belong to the branch they were created on
+// (recorded as ": WIP on <branch>:" / ": On <branch>:" in the stash reflog).
+//
+// This lets a caller attribute stashes to a polecat's *recorded* work branch even
+// after its worktree has moved to detached HEAD and deleted that branch — which is
+// exactly what post-submit polecats do (submit-and-exit detaches + deletes). In that
+// state StashCount's live CurrentBranch() lookup returns "HEAD" and falls back to
+// counting EVERY stash in the shared repo, over-counting other polecats' stashes
+// (gt-eflz Edge B). An empty or "HEAD" branch here keeps that safe over-count
+// fallback — better to over-block a removal than silently lose work.
+func (g *Git) StashCountForBranch(branch string) (int, error) {
+	out, err := g.run("stash", "list")
+	if err != nil {
+		return 0, err
+	}
+	if out == "" {
+		return 0, nil
+	}
+	return countStashesForBranch(out, branch), nil
+}
+
+// countStashesForBranch counts stash reflog lines attributed to branch. When branch
+// is "" or "HEAD" (undeterminable), every non-empty line counts (safe fallback).
+//
+// Stash reflog lines have the format:
+//
+//	stash@{N}: WIP on <branch>: <hash> <message>
+//	stash@{N}: On <branch>: <message>
+//
+// The match is anchored to ": WIP on <branch>:" or ": On <branch>:" to avoid false
+// positives from commit messages that happen to contain "on <branch>:".
+func countStashesForBranch(stashListOutput, branch string) int {
+	filterByBranch := branch != "" && branch != "HEAD"
 	wipPrefix := ": WIP on " + branch + ":"
 	onPrefix := ": On " + branch + ":"
 
-	lines := strings.Split(out, "\n")
 	count := 0
-	for _, line := range lines {
+	for _, line := range strings.Split(stashListOutput, "\n") {
 		if line == "" {
 			continue
 		}
@@ -2087,7 +2119,7 @@ func (g *Git) StashCount() (int, error) {
 		}
 		count++
 	}
-	return count, nil
+	return count
 }
 
 // StashEntry represents one entry from `git stash list`, scoped to the current branch.

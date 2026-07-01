@@ -1581,6 +1581,75 @@ func TestStashCount_DetachedHEAD(t *testing.T) {
 	}
 }
 
+// TestStashCountForBranch verifies stashes can be attributed to a *named* branch,
+// which is how a detached-HEAD polecat's stashes are recovered from the shared stash
+// reflog after its work branch is deleted (gt-eflz Edge B). StashCount over-counts in
+// that state (the live branch reads as "HEAD", so it counts every stash in the shared
+// repo); StashCountForBranch with the recorded work branch counts only that branch's.
+func TestStashCountForBranch(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+
+	// A stash on the default branch — stands in for an unrelated / other-polecat stash.
+	if err := os.WriteFile(filepath.Join(dir, "main-dirty.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "stash", "push", "-m", "main-stash")
+
+	// A worktree on its own work branch, with its own stash.
+	wtDir := t.TempDir()
+	runGit(t, dir, "worktree", "add", wtDir, "-b", "polecat-work")
+	if err := os.WriteFile(filepath.Join(wtDir, "wt-dirty.txt"), []byte("y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, wtDir, "add", ".")
+	runGit(t, wtDir, "stash", "push", "-m", "wt-stash")
+
+	// Simulate submit-and-exit: detach HEAD, then delete the work branch.
+	runGit(t, wtDir, "checkout", "--detach")
+	runGit(t, wtDir, "branch", "-D", "polecat-work")
+
+	wtGit := NewGit(wtDir)
+
+	// Sanity: main repo still sees only its own stash (branch-filtered).
+	if mainCount, err := g.StashCount(); err != nil {
+		t.Fatalf("StashCount (main): %v", err)
+	} else if mainCount != 1 {
+		t.Fatalf("StashCount (main) = %d, want 1", mainCount)
+	}
+
+	// Detached StashCount over-counts: it sees both stashes in the shared repo.
+	all, err := wtGit.StashCount()
+	if err != nil {
+		t.Fatalf("StashCount (detached): %v", err)
+	}
+	if all != 2 {
+		t.Fatalf("StashCount (detached) = %d, want 2 (over-counts all shared stashes)", all)
+	}
+
+	// Attribution by recorded branch recovers only the polecat's own stash.
+	own, err := wtGit.StashCountForBranch("polecat-work")
+	if err != nil {
+		t.Fatalf("StashCountForBranch: %v", err)
+	}
+	if own != 1 {
+		t.Errorf("StashCountForBranch(polecat-work) = %d, want 1 (only this polecat's stash)", own)
+	}
+
+	// Empty / "HEAD" branch keeps the safe over-count fallback.
+	for _, b := range []string{"", "HEAD"} {
+		n, err := wtGit.StashCountForBranch(b)
+		if err != nil {
+			t.Fatalf("StashCountForBranch(%q): %v", b, err)
+		}
+		if n != 2 {
+			t.Errorf("StashCountForBranch(%q) = %d, want 2 (safe fallback counts all)", b, n)
+		}
+	}
+}
+
 // TestStashCount_CustomMessage verifies that StashCount handles both
 // "WIP on <branch>:" (auto-stash) and "On <branch>:" (custom message) formats.
 func TestStashCount_CustomMessage(t *testing.T) {

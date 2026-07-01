@@ -406,6 +406,19 @@ func (m *Manager) getCleanupStatusFromBead(name string) CleanupStatus {
 	return CleanupStatus(fields.CleanupStatus)
 }
 
+// recordedWorkBranch returns the polecat's last-known work branch from its agent
+// bead (written by gt done as completion metadata), or "" if unavailable. Used to
+// attribute stashes when the worktree is in detached HEAD: post-submit polecats
+// detach + delete their work branch, so the live branch can no longer be read from
+// the worktree, but the shared stash reflog still records it (gt-eflz Edge B).
+func (m *Manager) recordedWorkBranch(name string) string {
+	fields := m.AgentFields(name)
+	if fields == nil {
+		return ""
+	}
+	return fields.Branch
+}
+
 // AgentFields reads the polecat's agent bead and returns its parsed fields
 // (agent_state, hook_bead, cleanup_status, etc.). Returns nil if the bead does
 // not exist or cannot be read. Read-only; used by observability surfaces such as
@@ -1157,13 +1170,35 @@ func (m *Manager) RemoveWithOptions(name string, force, nuclear, selfNuke bool) 
 		polecatGit := git.NewGit(clonePath)
 		status, statusErr := polecatGit.CheckUncommittedWork()
 		if statusErr == nil {
+			// Edge B (gt-eflz): a post-submit polecat detaches HEAD and deletes its
+			// work branch (submit-and-exit), so CheckUncommittedWork's StashCount
+			// cannot read the live branch and falls back to counting EVERY stash in
+			// the shared repo — over-blocking removal and producing escalations that
+			// name the wrong polecat. Re-attribute using the recorded work branch from
+			// the agent bead so only THIS polecat's stashes count. Only override in the
+			// detached case; on a real branch StashCount already filtered correctly.
+			if branch, bErr := polecatGit.CurrentBranch(); bErr == nil && (branch == "" || branch == "HEAD") {
+				if recorded := m.recordedWorkBranch(name); recorded != "" {
+					if sc, scErr := polecatGit.StashCountForBranch(recorded); scErr == nil {
+						status.StashCount = sc
+					}
+				}
+			}
+
 			// UnpushedCommits returns 0 for an upstream-less branch, missing
 			// local-only commits (commits on no remote). Fold in the
 			// remote-reachability check so that class also blocks. Best-effort.
 			if localOnly, lErr := polecatGit.LocalOnlyCommits(); lErr == nil && localOnly > status.UnpushedCommits {
 				status.UnpushedCommits = localOnly
 			}
-			if !status.Clean() {
+
+			// Edge A (gt-eflz): evaluate file dirt with CleanExcludingRuntime (as
+			// gt done does) rather than the strict Clean(), so toolchain-managed
+			// runtime artifacts (.claude/.beads/.runtime/.logs/__pycache__) don't
+			// over-block removal — they're gitignored, not work. Stashes and
+			// unpushed/local-only commits still block: CleanExcludingRuntime evaluates
+			// file changes only, so they are checked explicitly alongside it.
+			if !status.CleanExcludingRuntime() || status.StashCount > 0 || status.UnpushedCommits > 0 {
 				if force {
 					// Force bypasses uncommitted changes + unpushed/local-only
 					// commits, but NEVER stashes — intentional work-in-progress

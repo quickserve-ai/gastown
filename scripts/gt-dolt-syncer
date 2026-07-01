@@ -88,6 +88,17 @@ DBS=(gastown xtm hq)                 # qcore PAUSED 2026-06-30 (gt-b5t9 post-dra
 # syncer exists to prevent). Pull is read-only on the remote and runs every
 # cycle regardless — only PUSH is gated. See vector #11 (gt-6o15).
 STAGGERED_DBS=(xtm qcore)   # qcore added 2026-06-10 (gt-cuqp): cross-town SHARED with Alex's q-core; after the 20:40 self-heal sync it pushes every cycle un-staggered, racing Alex's town on the manifest — stagger to even-ten only.
+
+# PUSH-PAUSED DBs: pull + integrity run every cycle (cheap, keeps local current), but
+# the PUSH is held until a controlled out-of-cycle #11087 catch-up drains it. Use this
+# (not DBS removal) when a DB's PULL is healthy but its PUSH is doomed under #11087 —
+# a perpetual DOLT_PUSH SIGKILL re-forks a cat-file-per-blob walk over the whole history
+# every cycle, orphaning server-side git ops that pin the shared 3307 server and hang
+# bd/gt town-wide. hq PAUSED 2026-07-01 (incident, gt-6akc): 48-cycle push SIGKILL over
+# a 65k-commit history saturated Dolt at 130% CPU. hq is our-town-only, so a lagging
+# origin/hq is safe. Drain + un-pause per the bead. (qcore uses full DBS-removal instead
+# because its PULL also fails — see gt-l4b5.)
+PULL_ONLY_DBS=(hq)
 DATA_DIR="$HOME/gt/.dolt-data"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 WORKSPACE="$HOME/gt/gastown/crew/woodhouse"  # a Gas Town workspace dir — gt and bd
@@ -220,6 +231,8 @@ set_streak()  { echo "$2" >"$(streak_file "$1")"; }
 
 # Is this DB cross-town shared (push-staggered)?
 is_staggered() { local d; for d in "${STAGGERED_DBS[@]}"; do [[ "$d" == "$1" ]] && return 0; done; return 1; }
+# Is this DB push-paused (pull-only until a controlled #11087 catch-up drains it)?
+is_pull_only() { local d; for d in "${PULL_ONLY_DBS[@]}"; do [[ "$d" == "$1" ]] && return 0; done; return 1; }
 # We own the EVEN ten-minute marks (:00/:20/:40). 10#$(date +%M) forces base-10
 # so leading-zero minutes (08, 09) don't parse as invalid octal.
 is_our_push_window() { (( ( 10#$(date +%M) / 10 ) % 2 == 0 )); }
@@ -283,6 +296,18 @@ syncer refused to push, to avoid propagating the dangling reference onward.
 Investigate the local '$db' store at $DATA_DIR/$db before any further push.
 See runs.log: $RUNLOG"
     return 1
+  fi
+
+  # Push paused (#11087 drain pending): pull + integrity ran this cycle (keeps local
+  # current), but the doomed push is held out of the per-cycle churn until a controlled
+  # out-of-cycle catch-up drains it. Clear the stale push alert — this is intentionally
+  # held, not failing. See PULL_ONLY_DBS.
+  if is_pull_only "$db"; then
+    set_streak "$db" 0
+    clear_alert "push-$db"
+    DB_RESULT[$db]=ok; DB_REASON[$db]="pull-only (push paused — #11087 drain pending)"
+    log "[$db] push PAUSED (pull-only) — controlled #11087 catch-up pending"
+    return 0
   fi
 
   # Cross-town stagger: a shared DB pushes only in OUR window (even ten-minute

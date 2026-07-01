@@ -80,7 +80,7 @@ set -u
 #            ~17s well under the cycle timeout (verified). hq is our-internal
 #            (Alex never writes it) so it is NOT push-staggered. The earlier 2-min
 #            SIGKILLs were the one-time accumulated-delta drain, not steady state.
-DBS=(gastown qcore xtm hq)           # + hq REJOINED 2026-06-08 (gt-9yqz reconcile; steady-state push ~17s flat-RSS); xtm rejoined 2026-06-03 PR#10 pull-only
+DBS=(gastown xtm hq)                 # qcore PAUSED 2026-06-30 (gt-b5t9 post-drain): after the auth fix, #11087 makes qcore's backlog exceed the 300s op-timeout in BOTH directions (pull AND push SIGKILL every cycle, orphaning server-side) — held out of the per-cycle churn until a controlled out-of-cycle catch-up (unbounded pull-merge-push, timed off Alex's window) drains it, then re-add qcore. + hq REJOINED 2026-06-08 (gt-9yqz); xtm rejoined 2026-06-03 PR#10 pull-only
 
 # Cross-town SHARED DBs push only on EVEN ten-minute marks (:00/:20/:40); Alex's
 # town pushes on ODD marks. One bounded pusher per town, staggered, so the two

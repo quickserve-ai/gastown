@@ -61,12 +61,27 @@ func init() {
 
 // PatrolScanOutput is the JSON output format for patrol scan results.
 type PatrolScanOutput struct {
-	Rig         string                    `json:"rig"`
-	Timestamp   string                    `json:"timestamp"`
-	Zombies     *PatrolScanZombieOutput   `json:"zombies"`
-	Stalls      *PatrolScanStallOutput    `json:"stalls,omitempty"`
-	Completions *PatrolScanCompleteOutput `json:"completions,omitempty"`
-	Receipts    []witness.PatrolReceipt   `json:"receipts,omitempty"`
+	Rig          string                    `json:"rig"`
+	Timestamp    string                    `json:"timestamp"`
+	Zombies      *PatrolScanZombieOutput   `json:"zombies"`
+	IdleSessions []PatrolScanIdleItem      `json:"idle_sessions,omitempty"`
+	Stalls       *PatrolScanStallOutput    `json:"stalls,omitempty"`
+	Completions  *PatrolScanCompleteOutput `json:"completions,omitempty"`
+	Receipts     []witness.PatrolReceipt   `json:"receipts,omitempty"`
+}
+
+// PatrolScanIdleItem is an idle polecat session surfaced as data (gt-eflz
+// Phase 2). Idle polecats are healthy (gt-s8bq), not zombies — but the
+// witness formula's guarded-reap policy needs to see them instead of the
+// scan skipping them silently. cleanup_status is the SELF-REPORTED bead
+// field (stale-prone); the formula must fresh-check via `gt polecat
+// git-state` before acting on it.
+type PatrolScanIdleItem struct {
+	Polecat       string `json:"polecat"`
+	AgentState    string `json:"agent_state"`
+	HookBead      string `json:"hook_bead,omitempty"`
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	IdleSeconds   int64  `json:"idle_seconds,omitempty"`
 }
 
 // PatrolScanZombieOutput holds zombie detection results.
@@ -106,9 +121,9 @@ type PatrolScanStallItem struct {
 
 // PatrolScanCompleteOutput holds completion discovery results.
 type PatrolScanCompleteOutput struct {
-	Checked   int                       `json:"checked"`
-	Found     int                       `json:"found"`
-	Completed []PatrolScanCompleteItem  `json:"completed,omitempty"`
+	Checked   int                      `json:"checked"`
+	Found     int                      `json:"found"`
+	Completed []PatrolScanCompleteItem `json:"completed,omitempty"`
 }
 
 // PatrolScanCompleteItem is a single completion discovery in scan output.
@@ -261,6 +276,17 @@ func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.Detec
 			zo.Errors = append(zo.Errors, e.Error())
 		}
 		output.Zombies = zo
+
+		// gt-eflz Phase 2: surface idle sessions as data for the formula.
+		for _, is := range zombieResult.IdleSessions {
+			output.IdleSessions = append(output.IdleSessions, PatrolScanIdleItem{
+				Polecat:       is.PolecatName,
+				AgentState:    is.AgentState,
+				HookBead:      is.HookBead,
+				CleanupStatus: is.CleanupStatus,
+				IdleSeconds:   is.IdleSeconds,
+			})
+		}
 	}
 
 	// Stalls
@@ -351,6 +377,18 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 
 		if len(zombieResult.ConvoyFailures) > 0 {
 			fmt.Printf("  Convoy failures: %d\n", len(zombieResult.ConvoyFailures))
+		}
+
+		// gt-eflz Phase 2: idle sessions are healthy (gt-s8bq) but surfaced
+		// as data so the witness formula's guarded-reap policy can see them.
+		if len(zombieResult.IdleSessions) > 0 {
+			fmt.Printf("  Idle sessions (healthy, surfaced for formula): %d\n", len(zombieResult.IdleSessions))
+			if patrolScanVerbose {
+				for _, is := range zombieResult.IdleSessions {
+					fmt.Printf("    - %s: state=%s cleanup=%s idle=%ds\n",
+						is.PolecatName, is.AgentState, is.CleanupStatus, is.IdleSeconds)
+				}
+			}
 		}
 		fmt.Println()
 	}

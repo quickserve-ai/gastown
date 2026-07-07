@@ -80,6 +80,70 @@ func TestPatrolScanOutputJSON(t *testing.T) {
 	}
 }
 
+// TestPatrolScanIdleSessionsJSON verifies the gt-eflz Phase 2 idle-session
+// surfacing: idle polecats appear under idle_sessions (data for the witness
+// formula's guarded-reap policy), NOT in the zombies list (gt-s8bq: idle
+// polecats are healthy).
+func TestPatrolScanIdleSessionsJSON(t *testing.T) {
+	output := PatrolScanOutput{
+		Rig:       "gastown",
+		Timestamp: "2026-07-06T18:00:00Z",
+		Zombies: &PatrolScanZombieOutput{
+			Checked: 2,
+			Found:   0,
+		},
+		IdleSessions: []PatrolScanIdleItem{
+			{
+				Polecat:       "furiosa",
+				AgentState:    "idle",
+				CleanupStatus: "clean",
+				IdleSeconds:   7200,
+			},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("failed to marshal output: %v", err)
+	}
+
+	var parsed PatrolScanOutput
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+
+	if len(parsed.IdleSessions) != 1 {
+		t.Fatalf("len(IdleSessions) = %d, want 1", len(parsed.IdleSessions))
+	}
+	is := parsed.IdleSessions[0]
+	if is.Polecat != "furiosa" {
+		t.Errorf("idle Polecat = %q, want %q", is.Polecat, "furiosa")
+	}
+	if is.AgentState != "idle" {
+		t.Errorf("idle AgentState = %q, want %q", is.AgentState, "idle")
+	}
+	if is.CleanupStatus != "clean" {
+		t.Errorf("idle CleanupStatus = %q, want %q", is.CleanupStatus, "clean")
+	}
+	if is.IdleSeconds != 7200 {
+		t.Errorf("idle IdleSeconds = %d, want 7200", is.IdleSeconds)
+	}
+	// Idle sessions are healthy — they must NOT be classified as zombies.
+	if parsed.Zombies.Found != 0 || len(parsed.Zombies.Zombies) != 0 {
+		t.Errorf("idle sessions must not appear as zombies (found=%d, len=%d)",
+			parsed.Zombies.Found, len(parsed.Zombies.Zombies))
+	}
+	// The empty hook_bead must be omitted from JSON, not serialized as "".
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("failed to unmarshal raw: %v", err)
+	}
+	items := raw["idle_sessions"].([]any)
+	if _, present := items[0].(map[string]any)["hook_bead"]; present {
+		t.Error("empty hook_bead should be omitted from idle_sessions JSON")
+	}
+}
+
 func TestCountActiveWorkZombies(t *testing.T) {
 	result := &witness.DetectZombiePolecatsResult{
 		Zombies: []witness.ZombieResult{
